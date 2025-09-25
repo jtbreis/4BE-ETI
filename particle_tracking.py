@@ -36,15 +36,12 @@ box_size_initial_z = 2
 # box size used after a track is initialized (this should be as small as possible to
 # eliminate spurious track)
 box_size = 1
+track_length = 4
 
 
 """
-Start of the code; user should not change anything after this point 
+Start of the code; user should not change anything after this point
 """
-
-
-# data = basic_utils.load_data(main_dir, trial_name, file_type)
-data = basic_utils.load_data_h5(os.path.join(folder, filename))
 
 logger = basic_utils.initialize_logfile(
     folder, 'logfile_' + run + '.log')
@@ -55,33 +52,45 @@ logging.info('Particle tracking initialized.')
 
 
 start_time = time.time()
+# Create an array of frame index ranges, each containing 4 consecutive frames
+# assuming Slice contains frame indices starting from 0
+num_frames = basic_utils.get_nframes(os.path.join(folder, filename))
+frame_ranges = [list(range(i, min(i + track_length, num_frames)))
+                for i in range(0, num_frames, track_length)]
 
-for jj in range(0, 3):
-    if jj % 500 == 0:
-        logging.info(str(jj))
-        logging.info(str(time.time() - start_time) + 'seconds')
-    imInit = np.where(data.Slice == jj)[0]
-    for ii in range(len(imInit)):
-        if data.Count[imInit[ii]] == 0:
-            if dimension == '3d':
-                data = no_previous_tracks_3d(data, jj, ii, box_size,
-                                             box_size_initial_x,
-                                             box_size_initial_y,
-                                             box_size_initial_z)
+basic_utils.create_h5_file(folder=folder)
+
+for frame_range in frame_ranges:
+    print(f'Processing frames {frame_range}')
+    data_range = basic_utils.load_data_h5(
+        os.path.join(folder, filename), frame_range)
+    for jj in range(min(frame_range), max(frame_range)):
+        if jj % 500 == 0:
+            logging.info(str(jj))
+            logging.info(str(time.time() - start_time) + 'seconds')
+        imInit = np.where(data_range.Slice == jj)[0]
+        for ii in range(len(imInit)):
+            if data_range.Count[imInit[ii]] == 0:
+                if dimension == '3d':
+                    data_range = no_previous_tracks_3d(data_range, jj, ii, box_size,
+                                                       box_size_initial_x,
+                                                       box_size_initial_y,
+                                                       box_size_initial_z)
+                else:
+                    data_range = no_previous_tracks(data_range, jj, ii, box_size,
+                                                    box_size_initial_x,
+                                                    box_size_initial_y)
             else:
-                data = no_previous_tracks(data, jj, ii, box_size,
-                                          box_size_initial_x,
-                                          box_size_initial_y)
-        else:
-            if dimension == '3d':
-                data = previous_tracks_3d(data, jj, ii, box_size)
-            else:
-                data = previous_tracks(data, jj, ii, box_size)
+                if dimension == '3d':
+                    data_range = previous_tracks_3d(
+                        data_range, jj, ii, box_size)
+                else:
+                    data_range = previous_tracks(data_range, jj, ii, box_size)
 
-    if len(data.Count[data.Count == -1]) > 0:
-        data.Count[data.Count == (-1)] = 0
+        if len(data_range.Count[data_range.Count == -1]) > 0:
+            data_range.Count[data_range.Count == (-1)] = 0
 
-basic_utils.write_data_h5(data, folder)
+    basic_utils.write_data_h5(data_range, folder, frame_range)
 
 logging.info('Particle tracking program took ' +
              str(time.time() - start_time) + ' seconds to run.')

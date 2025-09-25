@@ -115,20 +115,29 @@ def load_data(main_dir, trial_name, file_type):
     return data
 
 
-def load_data_h5(filename):
+def get_nframes(filename):
+    with h5py.File(filename, 'r') as f:
+        return len(f.values())
+
+
+def load_data_h5(filename, frame_range):
     data = a()
     with h5py.File(filename, 'r') as f:
-        slices = np.empty(len(f.keys()), dtype=object)
-        x = np.empty(len(f.keys()), dtype=object)
-        y = np.empty(len(f.keys()), dtype=object)
-        z = np.empty(len(f.keys()), dtype=object)
-        for frame_idx, frame in enumerate(f.values()):
+        nframes = len(frame_range)
+        slices = np.empty(nframes, dtype=object)
+        x = np.empty(nframes, dtype=object)
+        y = np.empty(nframes, dtype=object)
+        z = np.empty(nframes, dtype=object)
+
+        for idx, frame_idx in enumerate(frame_range):
+            key = f"frame{frame_idx:05d}"
+            frame = f[key]
             xyze = np.array(frame['xyze'])
-            x[frame_idx] = xyze[0].reshape(-1, 1)
-            y[frame_idx] = xyze[1].reshape(-1, 1)
-            z[frame_idx] = xyze[2].reshape(-1, 1)
-            slices[frame_idx] = np.ones(
-                [xyze[0].shape[0], 1], dtype=int) * frame_idx
+            x[idx] = xyze[0].reshape(-1, 1)
+            y[idx] = xyze[1].reshape(-1, 1)
+            z[idx] = xyze[2].reshape(-1, 1)
+            slices[idx] = np.ones([xyze[0].shape[0], 1], dtype=int) * frame_idx
+
         data.x = np.concatenate(np.vstack(x))
         data.y = np.concatenate(np.vstack(y))
         data.z = np.concatenate(np.vstack(z))
@@ -141,13 +150,20 @@ def load_data_h5(filename):
     return data
 
 
-def write_data_h5(data: a, folder):
-    filename = os.path.join(folder, 'track.h5')
+def create_h5_file(folder):
+    filename = os.path.join(folder, 'tracks.h5')
     with h5py.File(filename, 'w') as f:
-        f.create_dataset('X', data=data.x)
-        f.create_dataset('Y', data=data.y)
-        f.create_dataset('Z', data=data.z)
-        f.create_dataset('Slice', data=data.Slice)
-        f.create_dataset('Count', data=data.Count)
-        f.create_dataset('Cost', data=data.Cost)
-        f.create_dataset('Area', data=data.Area)
+        return
+
+
+def write_data_h5(data: a, folder, frame_range):
+    filename = os.path.join(folder, 'tracks.h5')
+    with h5py.File(filename, 'a') as f:
+        grp = f.create_group(f'frames{min(frame_range)}-{max(frame_range)}')
+        grp.create_dataset('X', data=data.x)
+        grp.create_dataset('Y', data=data.y)
+        grp.create_dataset('Z', data=data.z)
+        grp.create_dataset('Slice', data=data.Slice)
+        grp.create_dataset('Count', data=data.Count)
+        grp.create_dataset('Cost', data=data.Cost)
+        grp.create_dataset('Area', data=data.Area)

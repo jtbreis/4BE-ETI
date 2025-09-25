@@ -5,8 +5,10 @@ import re
 
 import numpy as np
 import pandas as pd
+import h5py
 
-## This file introduces functions that are needed
+# This file introduces functions that are needed
+
 
 def initialize_logfile(main_dir, filename):
     """
@@ -19,7 +21,8 @@ def initialize_logfile(main_dir, filename):
     logger.setLevel(logging.DEBUG)
     handler = logging.FileHandler(main_dir + filename)
     handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)-15s %(levelname)-8s - %(message)s')
+    formatter = logging.Formatter(
+        '%(asctime)-15s %(levelname)-8s - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
@@ -49,6 +52,7 @@ class a:
     Defines a class named a to label the data more easily. For example, this
     class allows data['X'] to be redefined as data.x
     """
+
     def __init__(self):
         self.x = []
         self.y = []
@@ -87,24 +91,51 @@ def load_data(main_dir, trial_name, file_type):
     Input: main_dir - directory that contains the particle data
     Output: data - data class containing the results
     """
-    
+
     if file_type == '.csv':
         data_df = pd.read_csv(main_dir + trial_name + file_type)
     elif file_type == '.txt':
-        data_df = pd.read_csv(main_dir + trial_name + file_type, 
+        data_df = pd.read_csv(main_dir + trial_name + file_type,
                               sep=None, engine='python')
     elif file_type == '.pkl':
         data_df = pd.read_pickle(main_dir + trial_name + file_type)
     else:
-        raise ValueError('Particle file must be either a csv, txt, or pkl file')
+        raise ValueError(
+            'Particle file must be either a csv, txt, or pkl file')
 
     if 'Area' not in data_df:
-        data_df['Area'] = -np.ones(len(data_df)) 
-    
+        data_df['Area'] = -np.ones(len(data_df))
+
     data_df['Count'] = np.zeros(len(data_df))
     data_df['CountTemp'] = np.zeros(len(data_df))
     data_df['Cost'] = -np.ones(len(data_df))
 
     data = convert_class(data_df)
+
+    return data
+
+
+def load_data_h5(filename):
+    data = a()
+    with h5py.File(filename, 'r') as f:
+        slices = np.empty(len(f.keys()), dtype=object)
+        x = np.empty(len(f.keys()), dtype=object)
+        y = np.empty(len(f.keys()), dtype=object)
+        z = np.empty(len(f.keys()), dtype=object)
+        for frame_idx, frame in enumerate(f.values()):
+            xyze = np.array(frame['xyze'])
+            x[frame_idx] = xyze[0].reshape(-1, 1)
+            y[frame_idx] = xyze[1].reshape(-1, 1)
+            z[frame_idx] = xyze[2].reshape(-1, 1)
+            slices[frame_idx] = np.ones(
+                [xyze[0].shape[0], 1], dtype=int) * frame_idx
+        data.x = np.concatenate(np.vstack(x))
+        data.y = np.concatenate(np.vstack(y))
+        data.z = np.concatenate(np.vstack(z))
+        data.Slice = np.concatenate(np.vstack(slices))
+        data.Count = np.zeros_like(data.x)
+        data.CountTemp = np.zeros_like(data.x)
+        data.Cost = -np.ones_like(data.x)
+        data.Area = -np.ones_like(data.x)
 
     return data

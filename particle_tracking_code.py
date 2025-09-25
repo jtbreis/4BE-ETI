@@ -17,11 +17,11 @@ def finding_indices(x_ind, xPred_ind, y_ind, yPred_ind):
     Outputs: ind - indices of the same original x and y locations
              ind_pred - indices of the same predicted x and y locations
     """
-    a = np.zeros((len(x_ind), 2), dtype=np.int)
+    a = np.zeros((len(x_ind), 2), dtype=int)
     a[:, 0] = x_ind
     a[:, 1] = xPred_ind
 
-    b = np.zeros((len(y_ind), 2), dtype=np.int)
+    b = np.zeros((len(y_ind), 2), dtype=int)
     b[:, 0] = y_ind
     b[:, 1] = yPred_ind
 
@@ -165,8 +165,10 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x, box_size_init
     if len(ind2) == 0:
         return data
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * data.x[im1[ind1[ind2_pred]]] + 0.5 * data.x[im0[ii]]
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * data.y[im1[ind1[ind2_pred]]] + 0.5 * data.y[im0[ii]]
+    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * \
+        data.x[im1[ind1[ind2_pred]]] + 0.5 * data.x[im0[ii]]
+    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * \
+        data.y[im1[ind1[ind2_pred]]] + 0.5 * data.y[im0[ii]]
 
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3])
@@ -356,9 +358,12 @@ def no_previous_tracks_3d(data, im, ii, box_size, box_size_initial_x, box_size_i
     if len(ind2) == 0:
         return data
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * data.x[im1[ind1[ind2_pred]]] + 0.5 * data.x[im0[ii]]
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * data.y[im1[ind1[ind2_pred]]] + 0.5 * data.y[im0[ii]]
-    zPred3 = 2.5 * data.z[im2[ind2]] - 2 * data.z[im1[ind1[ind2_pred]]] + 0.5 * data.z[im0[ii]]
+    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * \
+        data.x[im1[ind1[ind2_pred]]] + 0.5 * data.x[im0[ii]]
+    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * \
+        data.y[im1[ind1[ind2_pred]]] + 0.5 * data.y[im0[ii]]
+    zPred3 = 2.5 * data.z[im2[ind2]] - 2 * \
+        data.z[im1[ind1[ind2_pred]]] + 0.5 * data.z[im0[ii]]
 
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3])

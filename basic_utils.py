@@ -139,3 +139,15 @@ def load_data_h5(filename):
         data.Area = -np.ones_like(data.x)
 
     return data
+
+
+def write_data_h5(data: a, folder):
+    filename = os.path.join(folder, 'track.h5')
+    with h5py.File(filename, 'w') as f:
+        f.create_dataset('X', data=data.x)
+        f.create_dataset('Y', data=data.y)
+        f.create_dataset('Z', data=data.z)
+        f.create_dataset('Slice', data=data.Slice)
+        f.create_dataset('Count', data=data.Count)
+        f.create_dataset('Cost', data=data.Cost)
+        f.create_dataset('Area', data=data.Area)

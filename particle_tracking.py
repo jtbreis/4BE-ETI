@@ -81,22 +81,7 @@ for jj in range(0, 3):
     if len(data.Count[data.Count == -1]) > 0:
         data.Count[data.Count == (-1)] = 0
 
-if dimension == '3d':
-    data_final = pd.DataFrame({'X': data.x, 'Y': data.y, 'Z': data.z,
-                               'Slice': data.Slice, 'Count': data.Count,
-                               'Cost': data.Cost, 'Area': data.Area})
-else:
-    data_final = pd.DataFrame({'X': data.x, 'Y': data.y,
-                               'Slice': data.Slice, 'Count': data.Count,
-                               'Cost': data.Cost, 'Area': data.Area})
-
-# data_final.to_pickle(
-#     folder + 'tracking_results_box_size_' + run + '.pkl')
-
-data_final.to_hdf(
-    os.path.join(folder, f'tracking_results_box_size_{run}.h5'),
-    key='df', mode='w'
-)
+basic_utils.write_data_h5(data, folder)
 
 logging.info('Particle tracking program took ' +
              str(time.time() - start_time) + ' seconds to run.')

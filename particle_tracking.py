@@ -30,9 +30,9 @@ dimension = '3d'
 # maximum displacement of the particles in the x direction between frames)
 box_size_initial_x = 2
 # box size in y direction for track initialization
-box_size_initial_y = 2
+box_size_initial_y = 1.5
 # box size in z direction for track initialization
-box_size_initial_z = 2
+box_size_initial_z = 1
 # box size used after a track is initialized (this should be as small as possible to
 # eliminate spurious track)
 box_size = 1

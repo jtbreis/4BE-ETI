@@ -1,9 +1,9 @@
 import numpy as np
-from .io.read_h5 import read_tracks_from_h5, get_nsamples_from_h5
-from .track import Track
+from ..io.read_h5 import read_tracks_from_h5, get_nsamples_from_h5
+from ..track import Track
 
 
-def load_tracks(filename, dt, rep_rate, min_length=3):
+def load_tracks(filename, dt, rep_rate, run=0, min_length=3):
     nsamples = get_nsamples_from_h5(filename)
     frame_range = [range(i * 4, (i + 1) * 4) for i in range(nsamples)]
     samples = []
@@ -21,7 +21,8 @@ def load_tracks(filename, dt, rep_rate, min_length=3):
                 X[idx], Y[idx], Z[idx],
                 dt,
                 idx,
-                1 / rep_rate * sample_idx
+                1 / rep_rate * sample_idx,
+                run
             )
             track.compute_velocity()
             track.compute_acceleration()

@@ -2,7 +2,7 @@ import numpy as np
 
 
 class Track():
-    def __init__(self, X, Y, Z, dt, idx, time):
+    def __init__(self, X, Y, Z, dt, idx, time, run):
         self.time = time
         self.dt = dt
         self.X = X
@@ -10,22 +10,23 @@ class Track():
         self.Z = Z
         self.idx = idx
         self.track_length = X.shape[0]
+        self.run = run
 
     def compute_velocity(self):
-        if self.track_length < 2:
-            print('You need at least 2 entries to calculate velocity')
+        # if self.track_length < 2:
+        #     print('You need at least 2 entries to calculate velocity')
         self.vx = np.diff(self.X) / self.dt
         self.vy = np.diff(self.Y) / self.dt
         self.vz = np.diff(self.Z) / self.dt
-        self.v = np.array([self.vx, self.vy, self.vz])
-        self.vmag = np.linalg.norm(self.v)
+        self.v = np.stack([self.vx, self.vy, self.vz], axis=-1)
+        self.vmag = np.linalg.norm(self.v, axis=1)
 
     def compute_acceleration(self):
         if self.v is None:
             print('Calculate Velocity first!')
             return
-        if self.track_length < 3:
-            print('You need at least 3 entries to calculate acceleration!')
+        # if self.track_length < 3:
+        #     print('You need at least 3 entries to calculate acceleration!')
         self.ax = np.diff(self.vx) / self.dt
         self.ay = np.diff(self.vy) / self.dt
         self.az = np.diff(self.vz) / self.dt

@@ -20,6 +20,8 @@ class Track():
         self.vz = np.diff(self.Z) / self.dt
         self.v = np.stack([self.vx, self.vy, self.vz], axis=-1)
         self.vmag = np.linalg.norm(self.v, axis=1)
+        self.vmean = np.mean(self.v, axis=0)
+        self.vstd = np.std(self.v, axis=0)
 
     def compute_acceleration(self):
         if self.v is None:
@@ -30,8 +32,10 @@ class Track():
         self.ax = np.diff(self.vx) / self.dt
         self.ay = np.diff(self.vy) / self.dt
         self.az = np.diff(self.vz) / self.dt
-        self.a = np.array([self.ax, self.ay, self.az])
-        self.amag = np.linalg.norm(self.a)
+        self.a = np.stack([self.ax, self.ay, self.az], axis=-1)
+        self.amag = np.linalg.norm(self.a, axis=1)
+        self.amean = np.mean(self.a, axis=0)
+        self.astd = np.std(self.a, axis=0)
 
     def mean_velocity(self):
         return np.mean(self.v)

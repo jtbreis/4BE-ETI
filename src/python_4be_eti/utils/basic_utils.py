@@ -164,13 +164,40 @@ def create_h5_file(folder):
 
 
 def write_data_h5(data: a, folder, frame_range):
-    filename = os.path.join(folder, 'tracks.h5')
+    filename = os.path.join(folder, 'tracks.h5part')
+
+    # print('test')
+    # data['vy'] =
+    # data['vz'] = np.where(data['Count'].diff() == 0,
+    #                       data['Z'].diff(), np.nan)
+    # data['ax'] = np.where(data['Count'].diff() == 0,
+    #                       data['vx'].diff(), np.nan)
+    # data['ay'] = np.where(data['Count'].diff() == 0,
+    #                       data['vy'].diff(), np.nan)
+    # data['ay'] = np.where(data['Count'].diff() == 0,
+    #                       data['vz'].diff(), np.nan)
+    # print('B')
+
     with h5py.File(filename, 'a') as f:
-        grp = f.create_group(f'frames{min(frame_range)}-{max(frame_range)}')
-        grp.create_dataset('X', data=data.x)
-        grp.create_dataset('Y', data=data.y)
-        grp.create_dataset('Z', data=data.z)
-        grp.create_dataset('Slice', data=data.Slice)
-        grp.create_dataset('Count', data=data.Count)
-        grp.create_dataset('Cost', data=data.Cost)
-        grp.create_dataset('Area', data=data.Area)
+        print(frame_range)
+        for frame in frame_range:
+            grp = f.create_group(f"Step#{frame}")
+
+            mask = (data.Slice == frame) & (data.Count != 0)
+            # print(data)
+            grp.create_dataset('x', data=data.x[mask])
+            grp.create_dataset('y', data=data.y[mask])
+            grp.create_dataset('z', data=data.z[mask])
+
+            # grp.create_dataset('vx', data=np.where(
+            #     data.Count[mask].diff() == 0, data.x[mask].diff(), np.nan))
+            # grp.create_dataset('vy', data=data[mask].y)
+            # grp.create_dataset('vz', data=data[mask].z)
+
+            # grp.create_dataset('ax', data=data[mask].x)
+            # grp.create_dataset('ay', data=data[mask].y)
+            # grp.create_dataset('az', data=data[mask].z)
+
+            grp.create_dataset("id", data=data.Count[mask])
+            # grp.create_dataset('Cost', data=data.Cost[mask])
+            # grp.create_dataset('Area', data=data.Area[mask])

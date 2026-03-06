@@ -4,7 +4,7 @@ import os
 import time
 import logging
 
-from .utils.basic_utils import get_nframes, chunk_list, create_h5_file
+from .utils.basic_utils import get_nframes, chunk_list, create_h5_file, merge_tracks_h5part_parts
 from .particle_tracking import process_batch
 
 
@@ -43,18 +43,41 @@ class FourFrameTracking():
 
         create_h5_file(folder=self.path)
 
-    def run_tracking(self, workers=8):
+    def run_tracking(self, workers=8, show_progress=True):
         start_time = time.time()
         batches = list(chunk_list(self.frame_ranges, workers))
-        with ProcessPoolExecutor() as executor:
-            futures = [
-                executor.submit(
+        n_ranges = sum(len(b) for b in batches)
+        logging.info(
+            "Starting tracking: %d frame ranges in %d batch(es), workers=%d",
+            n_ranges, len(batches), workers,
+        )
+        print("Tracking started ({} frame ranges, {} worker(s))...".format(n_ranges, workers), flush=True)
+        # Only show per-track progress bar when running sequentially (one worker)
+        use_progress = show_progress and (workers == 1)
+        # When using multiple workers, each batch writes to its own file to avoid HDF5 concurrent-write issues
+        use_part_files = workers > 1
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = []
+            for batch_idx, batch in enumerate(batches):
+                output_h5part = None
+                if use_part_files:
+                    output_h5part = os.path.join(
+                        self.path, "tracks_part_{:d}.h5part".format(batch_idx)
+                    )
+                fut = executor.submit(
                     process_batch, batch, self.path, self.filename,
                     self.dimension, self.box_size_track, self.box_size_x,
-                    self.box_size_y, self.box_size_z, start_time
+                    self.box_size_y, self.box_size_z, start_time,
+                    show_progress=use_progress,
+                    output_h5part=output_h5part,
+                    dt=self.dt,
                 )
-                for batch in batches
-            ]
+                futures.append(fut)
+            for fut in futures:
+                fut.result()
+
+        if use_part_files:
+            merge_tracks_h5part_parts(self.path)
 
         logging.info('Particle tracking program took ' +
                      str(time.time() - start_time) + ' seconds to run.')
@@ -76,7 +99,10 @@ class FourFrameTracking():
         )
         if not tracks:
             logging.warning(
-                "No tracks loaded from %s; skipping ParaView export.", self.path)
+                "No tracks loaded from %s (tracks.h5part missing, empty, or all tracks shorter than min_length=%s); skipping ParaView export.",
+                self.path,
+                self.min_track_length,
+            )
             return
         out_base = os.path.join(self.path, "tracks_paraview")
         write_tracks_paraview(

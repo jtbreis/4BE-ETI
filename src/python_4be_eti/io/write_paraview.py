@@ -42,7 +42,16 @@ def _single_track_geometry(tr):
             v_at_pts[1:-1] = 0.5 * (tr.vmag[:-1] + tr.vmag[1:])
     else:
         v_at_pts = np.full(n, np.nan, dtype=np.float64)
-    return points, conn, track_id, time_arr, v_at_pts
+    diameter_pts = np.asarray(getattr(tr, "diameter", np.full(n, np.nan))).astype(np.float64)
+    if len(diameter_pts) != n:
+        diameter_pts = np.full(n, np.nan, dtype=np.float64)
+    intensity_pts = np.asarray(getattr(tr, "intensity", np.full(n, np.nan))).astype(np.float64)
+    if len(intensity_pts) != n:
+        intensity_pts = np.full(n, np.nan, dtype=np.float64)
+    mass_pts = np.asarray(getattr(tr, "mass", np.full(n, np.nan))).astype(np.float64)
+    if len(mass_pts) != n:
+        mass_pts = np.full(n, np.nan, dtype=np.float64)
+    return points, conn, track_id, time_arr, v_at_pts, diameter_pts, intensity_pts, mass_pts
 
 
 def _tracks_to_geometry(tracks):
@@ -52,6 +61,9 @@ def _tracks_to_geometry(tracks):
     track_id_list = []
     time_list = []
     vmag_at_points_list = []
+    diameter_list = []
+    intensity_list = []
+    mass_list = []
 
     pt_offset = 0
     for tr in tracks:
@@ -81,19 +93,28 @@ def _tracks_to_geometry(tracks):
             vmag_at_points_list.append(v_at_pts)
         else:
             vmag_at_points_list.append(np.full(n, np.nan))
+        d = getattr(tr, 'diameter', None)
+        diameter_list.append(np.asarray(d).astype(np.float64) if d is not None and len(d) == n else np.full(n, np.nan))
+        i = getattr(tr, 'intensity', None)
+        intensity_list.append(np.asarray(i).astype(np.float64) if i is not None and len(i) == n else np.full(n, np.nan))
+        m = getattr(tr, 'mass', None)
+        mass_list.append(np.asarray(m).astype(np.float64) if m is not None and len(m) == n else np.full(n, np.nan))
 
     if not points_list:
-        return None, None, None, None, None
+        return None, None, None, None, None, None, None, None
 
     points = np.vstack(points_list).astype(np.float64)
     track_id = np.concatenate(track_id_list).astype(np.int32)
     time_arr = np.concatenate(time_list).astype(np.float64)
     vmag_at_points = np.concatenate(vmag_at_points_list).astype(np.float64)
+    diameter_pts = np.concatenate(diameter_list).astype(np.float64)
+    intensity_pts = np.concatenate(intensity_list).astype(np.float64)
+    mass_pts = np.concatenate(mass_list).astype(np.float64)
     # Mixed connectivity: flat list of ints
     connectivity = np.array(
         [x for c in connectivity_list for x in c], dtype=np.int32)
 
-    return points, connectivity, track_id, time_arr, vmag_at_points
+    return points, connectivity, track_id, time_arr, vmag_at_points, diameter_pts, intensity_pts, mass_pts
 
 
 def _write_paraview_per_snapshot(
@@ -121,16 +142,22 @@ def _write_paraview_per_snapshot(
     track_id_all = np.zeros((n_snapshots, n_pts_max), dtype=np.int32)
     time_all = np.zeros((n_snapshots, n_pts_max), dtype=np.float64)
     vmag_all = np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
+    diameter_all = np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
+    intensity_all = np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
+    mass_all = np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
     time_values = []
 
     for snap_idx, (tr_idx, geom) in enumerate(valid):
-        points, conn, track_id, time_arr, v_at_pts = geom
+        points, conn, track_id, time_arr, v_at_pts, d_pts, i_pts, m_pts = geom
         n = points.shape[0]
         points_all[snap_idx, :n, :] = points
         track_id_all[snap_idx, :n] = track_id
         time_all[snap_idx, :n] = time_arr
         if include_velocity_magnitude:
             vmag_all[snap_idx, :n] = v_at_pts
+        diameter_all[snap_idx, :n] = d_pts
+        intensity_all[snap_idx, :n] = i_pts
+        mass_all[snap_idx, :n] = m_pts
         time_values.append(float(time_arr[0]))
 
     # Static connectivity: one polyline, n_pts_max nodes (same for every timestep)
@@ -145,6 +172,9 @@ def _write_paraview_per_snapshot(
         f.create_dataset("TimeValues", data=np.array(time_values, dtype=np.float64))
         f.create_dataset("TrackId", data=track_id_all)
         f.create_dataset("Time", data=time_all)
+        f.create_dataset("Diameter", data=diameter_all)
+        f.create_dataset("Intensity", data=intensity_all)
+        f.create_dataset("Mass", data=mass_all)
         if include_velocity_magnitude:
             f.create_dataset("VelocityMagnitude", data=vmag_all)
 
@@ -170,6 +200,15 @@ def _write_paraview_per_snapshot(
         '      </Attribute>',
         '      <Attribute Name="Time" Type="Scalar" Center="Node">',
         '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d %d">%s:/Time</DataItem>' % (n_snapshots, n_pts_max, h5_ref),
+        '      </Attribute>',
+        '      <Attribute Name="Diameter" Type="Scalar" Center="Node">',
+        '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d %d">%s:/Diameter</DataItem>' % (n_snapshots, n_pts_max, h5_ref),
+        '      </Attribute>',
+        '      <Attribute Name="Intensity" Type="Scalar" Center="Node">',
+        '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d %d">%s:/Intensity</DataItem>' % (n_snapshots, n_pts_max, h5_ref),
+        '      </Attribute>',
+        '      <Attribute Name="Mass" Type="Scalar" Center="Node">',
+        '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d %d">%s:/Mass</DataItem>' % (n_snapshots, n_pts_max, h5_ref),
         '      </Attribute>',
     ]
     if include_velocity_magnitude:
@@ -232,7 +271,7 @@ def write_tracks_paraview(
         raise ValueError(
             "No valid tracks (each track must have at least 2 points)")
 
-    points, connectivity, track_id, time_arr, vmag_at_points = geom
+    points, connectivity, track_id, time_arr, vmag_at_points, diameter_pts, intensity_pts, mass_pts = geom
     n_points = points.shape[0]
     n_cells = len([t for t in tracks if len(t.X) >= 2])
 
@@ -241,6 +280,9 @@ def write_tracks_paraview(
         f.create_dataset("Connectivity", data=connectivity)
         f.create_dataset("TrackId", data=track_id)
         f.create_dataset("Time", data=time_arr)
+        f.create_dataset("Diameter", data=diameter_pts)
+        f.create_dataset("Intensity", data=intensity_pts)
+        f.create_dataset("Mass", data=mass_pts)
         if include_velocity_magnitude and np.any(np.isfinite(vmag_at_points)):
             f.create_dataset("VelocityMagnitude", data=vmag_at_points)
 
@@ -270,6 +312,21 @@ def write_tracks_paraview(
         '      <Attribute Name="Time" Type="Scalar" Center="Node">',
         '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d">' % n_points,
         '          %s:/Time' % h5_ref,
+        '        </DataItem>',
+        '      </Attribute>',
+        '      <Attribute Name="Diameter" Type="Scalar" Center="Node">',
+        '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d">' % n_points,
+        '          %s:/Diameter' % h5_ref,
+        '        </DataItem>',
+        '      </Attribute>',
+        '      <Attribute Name="Intensity" Type="Scalar" Center="Node">',
+        '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d">' % n_points,
+        '          %s:/Intensity' % h5_ref,
+        '        </DataItem>',
+        '      </Attribute>',
+        '      <Attribute Name="Mass" Type="Scalar" Center="Node">',
+        '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d">' % n_points,
+        '          %s:/Mass' % h5_ref,
         '        </DataItem>',
         '      </Attribute>',
     ]

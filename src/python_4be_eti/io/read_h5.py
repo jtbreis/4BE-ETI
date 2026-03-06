@@ -10,12 +10,21 @@ def load_tracks_from_h5part(folder, dt, rep_rate, run=0, min_length=2):
 
     Used to export tracks to ParaView format from the same folder.
     """
+    import logging
     from ..track import Track
 
     filename = os.path.join(folder, "tracks.h5part")
+    if not os.path.isfile(filename):
+        logging.warning("No tracks loaded: %s does not exist.", filename)
+        return []
     with h5py.File(filename, "r") as f:
         step_keys = [k for k in f.keys() if k.startswith("Step#")]
         if not step_keys:
+            logging.warning(
+                "No tracks loaded from %s: file has no Step# groups (empty or corrupted). "
+                "If you ran with workers>1, ensure merge of tracks_part_*.h5part ran.",
+                filename,
+            )
             return []
         # Sort by frame number
         def frame_num(k):
@@ -23,7 +32,8 @@ def load_tracks_from_h5part(folder, dt, rep_rate, run=0, min_length=2):
             return int(m.group(1)) if m else -1
 
         step_keys.sort(key=frame_num)
-        # Build per-track: track_id -> list of (frame, x, y, z) sorted by frame
+        has_props = "diameter" in f[step_keys[0]]
+        # Build per-track: track_id -> list of (frame, x, y, z, ...) sorted by frame
         tracks_raw = {}
         for key in step_keys:
             frame = frame_num(key)
@@ -32,20 +42,35 @@ def load_tracks_from_h5part(folder, dt, rep_rate, run=0, min_length=2):
             y = np.asarray(grp["y"]).ravel()
             z = np.asarray(grp["z"]).ravel()
             id_ = np.asarray(grp["id"]).ravel().astype(int)
+            if has_props:
+                d = np.asarray(grp["diameter"]).ravel()
+                intensity = np.asarray(grp["intensity"]).ravel()
+                m = np.asarray(grp["mass"]).ravel()
             for i in range(len(id_)):
                 tid = id_[i]
                 if tid not in tracks_raw:
                     tracks_raw[tid] = []
-                tracks_raw[tid].append((frame, x[i], y[i], z[i]))
+                if has_props:
+                    tracks_raw[tid].append((frame, x[i], y[i], z[i], d[i], intensity[i], m[i]))
+                else:
+                    tracks_raw[tid].append((frame, x[i], y[i], z[i], np.nan, np.nan, np.nan))
         tracks = []
         for tid, points in tracks_raw.items():
             points.sort(key=lambda p: p[0])
-            frames, X, Y, Z = zip(*points)
+            if has_props:
+                frames, X, Y, Z, D, I, M = zip(*points)
+                D, I, M = np.array(D), np.array(I), np.array(M)
+            else:
+                frames, X, Y, Z = zip(*[(p[0], p[1], p[2], p[3]) for p in points])
+                D = I = M = np.full(len(X), np.nan)
             X, Y, Z = np.array(X), np.array(Y), np.array(Z)
             if len(X) < min_length:
                 continue
             t0 = frames[0] * dt  # or (frames[0] // 4) / rep_rate for sample-based time
             tr = Track(X, Y, Z, dt, tid, t0, run)
+            tr.diameter = D
+            tr.intensity = I
+            tr.mass = M
             tr.compute_velocity()
             tr.compute_acceleration()
             tracks.append(tr)

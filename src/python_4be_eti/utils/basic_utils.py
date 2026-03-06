@@ -128,15 +128,37 @@ def load_data_h5(filename, frame_range):
         x = np.empty(nframes, dtype=object)
         y = np.empty(nframes, dtype=object)
         z = np.empty(nframes, dtype=object)
+        has_props = False
+        diameter_list = np.empty(nframes, dtype=object)
+        intensity_list = np.empty(nframes, dtype=object)
+        mass_list = np.empty(nframes, dtype=object)
 
         for idx, frame_idx in enumerate(frame_range):
             key = f"frame{frame_idx:05d}"
             frame = f[key]
             xyze = np.array(frame['xyze'])
+            n_pts = xyze[0].shape[0]
             x[idx] = xyze[0].reshape(-1, 1)
             y[idx] = xyze[1].reshape(-1, 1)
             z[idx] = xyze[2].reshape(-1, 1)
-            slices[idx] = np.ones([xyze[0].shape[0], 1], dtype=int) * frame_idx
+            slices[idx] = np.ones([n_pts, 1], dtype=int) * frame_idx
+
+            if 'diameter' in frame and 'intensity' in frame and 'mass' in frame:
+                d = np.array(frame['diameter'])   # (n_pts,) or (n_pts, maxcams)
+                i = np.array(frame['intensity'])
+                m = np.array(frame['mass'])
+                if d.ndim == 2:
+                    d = np.nanmean(d, axis=1)
+                    i = np.nanmean(i, axis=1)
+                    m = np.nanmean(m, axis=1)
+                diameter_list[idx] = d.reshape(-1, 1)
+                intensity_list[idx] = i.reshape(-1, 1)
+                mass_list[idx] = m.reshape(-1, 1)
+                has_props = True
+            else:
+                diameter_list[idx] = np.full((n_pts, 1), np.nan, dtype=np.float64)
+                intensity_list[idx] = np.full((n_pts, 1), np.nan, dtype=np.float64)
+                mass_list[idx] = np.full((n_pts, 1), np.nan, dtype=np.float64)
 
         data.x = np.concatenate(np.vstack(x))
         data.y = np.concatenate(np.vstack(y))
@@ -146,6 +168,10 @@ def load_data_h5(filename, frame_range):
         data.CountTemp = np.zeros_like(data.x)
         data.Cost = -np.ones_like(data.x)
         data.Area = -np.ones_like(data.x)
+        if has_props:
+            data.diameter = np.concatenate(np.vstack(diameter_list))
+            data.intensity = np.concatenate(np.vstack(intensity_list))
+            data.mass = np.concatenate(np.vstack(mass_list))
 
     return data
 
@@ -157,26 +183,43 @@ def chunk_list(seq, workers):
 
 
 def create_h5_file(folder):
-    filename = os.path.join(folder, 'tracks.h5')
+    filename = os.path.join(folder, 'tracks.h5part')
     with h5py.File(filename, 'w') as f:
         # Create an empty HDF5 file with no datasets or groups
         pass
 
 
-def write_data_h5(data: a, folder, frame_range):
-    filename = os.path.join(folder, 'tracks.h5part')
+def merge_tracks_h5part_parts(folder):
+    """
+    Merge tracks_part_*.h5part files into tracks.h5part.
+    Used after parallel tracking so a single file is available for ParaView export.
+    """
+    import glob
+    pattern = os.path.join(folder, 'tracks_part_*.h5part')
+    part_files = sorted(glob.glob(pattern))
+    if not part_files:
+        return
+    out_path = os.path.join(folder, 'tracks.h5part')
+    with h5py.File(out_path, 'w') as out:
+        for part_path in part_files:
+            with h5py.File(part_path, 'r') as inc:
+                for name in inc.keys():
+                    inc.copy(name, out)
+    for part_path in part_files:
+        try:
+            os.remove(part_path)
+        except OSError:
+            pass
+    logging.info("Merged %d part file(s) into %s", len(part_files), out_path)
 
-    # print('test')
-    # data['vy'] =
-    # data['vz'] = np.where(data['Count'].diff() == 0,
-    #                       data['Z'].diff(), np.nan)
-    # data['ax'] = np.where(data['Count'].diff() == 0,
-    #                       data['vx'].diff(), np.nan)
-    # data['ay'] = np.where(data['Count'].diff() == 0,
-    #                       data['vy'].diff(), np.nan)
-    # data['ay'] = np.where(data['Count'].diff() == 0,
-    #                       data['vz'].diff(), np.nan)
-    # print('B')
+
+def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0):
+    """Write track data to HDF5. If output_h5part is set (parallel mode), write to that file instead of folder/tracks.h5part.
+    Velocity (vx, vy, vz) and acceleration (ax, ay, az) are computed from position history and written when dt is provided.
+    """
+    filename = output_h5part if output_h5part else os.path.join(folder, 'tracks.h5part')
+    frame_range_set = set(frame_range)
+    dt = float(dt) if dt is not None else 1.0
 
     with h5py.File(filename, 'a') as f:
         print(frame_range)
@@ -184,20 +227,72 @@ def write_data_h5(data: a, folder, frame_range):
             grp = f.create_group(f"Step#{frame}")
 
             mask = (data.Slice == frame) & (data.Count != 0)
-            # print(data)
-            grp.create_dataset('x', data=data.x[mask])
-            grp.create_dataset('y', data=data.y[mask])
-            grp.create_dataset('z', data=data.z[mask])
+            n = int(np.sum(mask))
+            ids_cur = data.Count[mask]
+            x_cur = data.x[mask]
+            y_cur = data.y[mask]
+            z_cur = data.z[mask]
 
-            # grp.create_dataset('vx', data=np.where(
-            #     data.Count[mask].diff() == 0, data.x[mask].diff(), np.nan))
-            # grp.create_dataset('vy', data=data[mask].y)
-            # grp.create_dataset('vz', data=data[mask].z)
+            grp.create_dataset('x', data=x_cur)
+            grp.create_dataset('y', data=y_cur)
+            grp.create_dataset('z', data=z_cur)
 
-            # grp.create_dataset('ax', data=data[mask].x)
-            # grp.create_dataset('ay', data=data[mask].y)
-            # grp.create_dataset('az', data=data[mask].z)
+            # Velocity: (position - position_prev) / dt, NaN where no previous point
+            vx = np.full(n, np.nan, dtype=np.float64)
+            vy = np.full(n, np.nan, dtype=np.float64)
+            vz = np.full(n, np.nan, dtype=np.float64)
+            if (frame - 1) in frame_range_set:
+                mask_prev = (data.Slice == frame - 1) & (data.Count != 0)
+                ids_prev = data.Count[mask_prev]
+                id_to_idx = {}
+                for idx, tid in enumerate(ids_prev):
+                    id_to_idx[int(tid)] = idx
+                x_prev = data.x[mask_prev]
+                y_prev = data.y[mask_prev]
+                z_prev = data.z[mask_prev]
+                for i in range(n):
+                    tid = int(ids_cur[i])
+                    if tid in id_to_idx:
+                        j = id_to_idx[tid]
+                        vx[i] = (x_cur[i] - x_prev[j]) / dt
+                        vy[i] = (y_cur[i] - y_prev[j]) / dt
+                        vz[i] = (z_cur[i] - z_prev[j]) / dt
+            grp.create_dataset('vx', data=vx)
+            grp.create_dataset('vy', data=vy)
+            grp.create_dataset('vz', data=vz)
 
-            grp.create_dataset("id", data=data.Count[mask])
-            # grp.create_dataset('Cost', data=data.Cost[mask])
-            # grp.create_dataset('Area', data=data.Area[mask])
+            # Acceleration: (x_f - 2*x_f-1 + x_f-2) / dt^2, NaN where track history too short
+            ax = np.full(n, np.nan, dtype=np.float64)
+            ay = np.full(n, np.nan, dtype=np.float64)
+            az = np.full(n, np.nan, dtype=np.float64)
+            if (frame - 1) in frame_range_set and (frame - 2) in frame_range_set:
+                mask_prev = (data.Slice == frame - 1) & (data.Count != 0)
+                mask_prev_prev = (data.Slice == frame - 2) & (data.Count != 0)
+                ids_prev = data.Count[mask_prev]
+                ids_prev_prev = data.Count[mask_prev_prev]
+                id_to_idx_prev = {int(tid): idx for idx, tid in enumerate(ids_prev)}
+                id_to_idx_prev_prev = {int(tid): idx for idx, tid in enumerate(ids_prev_prev)}
+                x_prev = data.x[mask_prev]
+                y_prev = data.y[mask_prev]
+                z_prev = data.z[mask_prev]
+                x_prev_prev = data.x[mask_prev_prev]
+                y_prev_prev = data.y[mask_prev_prev]
+                z_prev_prev = data.z[mask_prev_prev]
+                dt2 = dt * dt
+                for i in range(n):
+                    tid = int(ids_cur[i])
+                    if tid in id_to_idx_prev and tid in id_to_idx_prev_prev:
+                        j = id_to_idx_prev[tid]
+                        k = id_to_idx_prev_prev[tid]
+                        ax[i] = (x_cur[i] - 2 * x_prev[j] + x_prev_prev[k]) / dt2
+                        ay[i] = (y_cur[i] - 2 * y_prev[j] + y_prev_prev[k]) / dt2
+                        az[i] = (z_cur[i] - 2 * z_prev[j] + z_prev_prev[k]) / dt2
+            grp.create_dataset('ax', data=ax)
+            grp.create_dataset('ay', data=ay)
+            grp.create_dataset('az', data=az)
+
+            grp.create_dataset("id", data=ids_cur)
+            if hasattr(data, 'diameter'):
+                grp.create_dataset('diameter', data=data.diameter[mask])
+                grp.create_dataset('intensity', data=data.intensity[mask])
+                grp.create_dataset('mass', data=data.mass[mask])

@@ -213,9 +213,10 @@ def merge_tracks_h5part_parts(folder):
     logging.info("Merged %d part file(s) into %s", len(part_files), out_path)
 
 
-def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0):
+def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, include_failed_tracks=False):
     """Write track data to HDF5. If output_h5part is set (parallel mode), write to that file instead of folder/tracks.h5part.
     Velocity (vx, vy, vz) and acceleration (ax, ay, az) are computed from position history and written when dt is provided.
+    If include_failed_tracks is True, particles with Count==0 (tracking failed) are also written; their id is 0 and a 'tracked' dataset (bool) is written per step.
     """
     filename = output_h5part if output_h5part else os.path.join(folder, 'tracks.h5part')
     frame_range_set = set(frame_range)
@@ -226,7 +227,10 @@ def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0):
         for frame in frame_range:
             grp = f.create_group(f"Step#{frame}")
 
-            mask = (data.Slice == frame) & (data.Count != 0)
+            if include_failed_tracks:
+                mask = (data.Slice == frame)
+            else:
+                mask = (data.Slice == frame) & (data.Count != 0)
             n = int(np.sum(mask))
             ids_cur = data.Count[mask]
             x_cur = data.x[mask]
@@ -292,6 +296,8 @@ def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0):
             grp.create_dataset('az', data=az)
 
             grp.create_dataset("id", data=ids_cur)
+            if include_failed_tracks:
+                grp.create_dataset('tracked', data=(ids_cur != 0).astype(np.uint8))  # 1 = tracked, 0 = failed
             if hasattr(data, 'diameter'):
                 grp.create_dataset('diameter', data=data.diameter[mask])
                 grp.create_dataset('intensity', data=data.intensity[mask])

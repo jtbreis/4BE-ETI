@@ -22,6 +22,7 @@ class FourFrameTracking():
         run=0,
         min_track_length=2,
         write_paraview=False,
+        write_failed_tracks=False,
     ):
         self.path = path
         self.filename = filename
@@ -35,6 +36,7 @@ class FourFrameTracking():
         self.run = run
         self.min_track_length = min_track_length
         self.write_paraview = write_paraview
+        self.write_failed_tracks = write_failed_tracks
         self.num_frames = get_nframes(
             os.path.join(path, filename))
         self.track_length = 4
@@ -71,6 +73,7 @@ class FourFrameTracking():
                     show_progress=use_progress,
                     output_h5part=output_h5part,
                     dt=self.dt,
+                    write_failed_tracks=self.write_failed_tracks,
                 )
                 futures.append(fut)
             for fut in futures:

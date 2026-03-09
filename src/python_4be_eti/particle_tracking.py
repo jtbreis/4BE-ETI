@@ -16,7 +16,7 @@ from .particle_tracking_code import no_previous_tracks_3d, no_previous_tracks, p
 def process_frame_range(frame_range, folder, filename, dimension,
                         box_size, box_size_initial_x, box_size_initial_y,
                         box_size_initial_z, start_time, show_progress=True,
-                        output_h5part=None, dt=1.0):
+                        output_h5part=None, dt=1.0, write_failed_tracks=False):
     print("  Loading frames {}-{}...".format(frame_range[0], frame_range[-1]), flush=True)
     data_range = load_data_h5(
         os.path.join(folder, filename), frame_range)
@@ -78,14 +78,14 @@ def process_frame_range(frame_range, folder, filename, dimension,
         if len(data_range.Count[data_range.Count == -1]) > 0:
             data_range.Count[data_range.Count == -1] = 0
 
-    write_data_h5(data_range, folder, frame_range, output_h5part=output_h5part, dt=dt)
+    write_data_h5(data_range, folder, frame_range, output_h5part=output_h5part, dt=dt, include_failed_tracks=write_failed_tracks)
     return f"[PID {os.getpid()}] Finished frame range {frame_range} in {time.time() - start_time:.1f}s)"
 
 
 def process_batch(batch, folder, filename, dimension,
                   box_size, box_size_initial_x, box_size_initial_y,
                   box_size_initial_z, start_time, show_progress=True,
-                  output_h5part=None, dt=1.0):
+                  output_h5part=None, dt=1.0, write_failed_tracks=False):
     print("[Worker] Processing batch ({} frame ranges)...".format(len(batch)), flush=True)
     results = []
     for frame_range in batch:
@@ -95,6 +95,7 @@ def process_batch(batch, folder, filename, dimension,
             box_size_initial_z, start_time, show_progress=show_progress,
             output_h5part=output_h5part,
             dt=dt,
+            write_failed_tracks=write_failed_tracks,
         )
         print(progress)
     return results

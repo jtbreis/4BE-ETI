@@ -32,7 +32,7 @@ def finding_indices(x_ind, xPred_ind, y_ind, yPred_ind):
     # The following line returns the (x,y) values that are the same in both
     C = np.intersect1d(a.view(dtype), b.view(dtype))
 
-    D = np.in1d(a.view(dtype), b.view(dtype))
+    D = np.isin(a.view(dtype), b.view(dtype)).ravel()
 
     a = a[D]
 

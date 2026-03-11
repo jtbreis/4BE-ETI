@@ -51,7 +51,7 @@ def finding_indices(x_ind, xPred_ind, y_ind, yPred_ind):
     # The following line returns the (x,y) values that are the same in both
     C = np.intersect1d(a.view(dtype), b.view(dtype))
 
-    D = np.in1d(a.view(dtype), b.view(dtype))
+    D = np.isin(a.view(dtype), b.view(dtype)).ravel()
 
     a = a[D]
 
@@ -141,7 +141,8 @@ def previous_tracks(data, im, ii, box_size):
     return data
 
 
-def no_previous_tracks(data, im, ii, box_size, box_size_initial_x, box_size_initial_y):
+def no_previous_tracks(data, im, ii, box_size, box_size_initial_x_lo, box_size_initial_x_hi,
+                       box_size_initial_y_lo, box_size_initial_y_hi):
     """
     Runs the particle tracking code for a path that has not already been started
     Inputs: data - the data array containing information about particles
@@ -149,6 +150,8 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x, box_size_init
             im - the current image number
             ii - the current particle in the image (im)
             box_size - size of the search box to use
+            box_size_initial_x_lo/hi, box_size_initial_y_lo/hi - half-widths for initial
+                search in negative/positive direction (x: [x0-lo, x0+hi], y: [y0-lo, y0+hi])
     Outputs: data - the data array containing information about particles and
                     previous tracking results, now updated for the current
                     particle
@@ -158,10 +161,10 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x, box_size_init
     im2 = np.where(data.Slice == im + 2)[0]
     im3 = np.where(data.Slice == im + 3)[0]
 
-    x1_ind = np.where((data.x[im1] >= data.x[im0[ii]] - box_size_initial_x) &
-                      (data.x[im1] <= data.x[im0[ii]] + box_size_initial_x))[0]
-    y1_ind = np.where((data.y[im1] >= data.y[im0[ii]] - box_size_initial_y) &
-                      (data.y[im1] <= data.y[im0[ii]] + box_size_initial_y))[0]
+    x1_ind = np.where((data.x[im1] >= data.x[im0[ii]] - box_size_initial_x_lo) &
+                      (data.x[im1] <= data.x[im0[ii]] + box_size_initial_x_hi))[0]
+    y1_ind = np.where((data.y[im1] >= data.y[im0[ii]] - box_size_initial_y_lo) &
+                      (data.y[im1] <= data.y[im0[ii]] + box_size_initial_y_hi))[0]
 
     ind1 = np.intersect1d(x1_ind, y1_ind)
 
@@ -333,7 +336,11 @@ def previous_tracks_3d(data, im, ii, box_size, _im0=None, _im1=None, _im2=None, 
     return data
 
 
-def no_previous_tracks_3d(data, im, ii, box_size, box_size_initial_x, box_size_initial_y, box_size_initial_z, _im0=None, _im1=None, _im2=None, _im3=None):
+def no_previous_tracks_3d(data, im, ii, box_size,
+                          box_size_initial_x_lo, box_size_initial_x_hi,
+                          box_size_initial_y_lo, box_size_initial_y_hi,
+                          box_size_initial_z_lo, box_size_initial_z_hi,
+                          _im0=None, _im1=None, _im2=None, _im3=None):
     """
     Runs the particle tracking code for a path that has not already been started
     Inputs: data - the data array containing information about particles
@@ -341,6 +348,8 @@ def no_previous_tracks_3d(data, im, ii, box_size, box_size_initial_x, box_size_i
             im - the current image number
             ii - the current particle in the image (im)
             box_size - size of the search box to use
+            box_size_initial_*_lo/hi - half-widths for initial search in negative/positive
+                direction per axis (e.g. x: [x0-x_lo, x0+x_hi])
             _im0,_im1,_im2,_im3 - optional precomputed frame indices (avoids repeated np.where)
     Outputs: data - the data array containing information about particles and
                     previous tracking results, now updated for the current
@@ -354,12 +363,12 @@ def no_previous_tracks_3d(data, im, ii, box_size, box_size_initial_x, box_size_i
         im2 = np.where(data.Slice == im + 2)[0]
         im3 = np.where(data.Slice == im + 3)[0]
 
-    x1_ind = np.where((data.x[im1] >= data.x[im0[ii]] - box_size_initial_x) &
-                      (data.x[im1] <= data.x[im0[ii]] + box_size_initial_x))[0]
-    y1_ind = np.where((data.y[im1] >= data.y[im0[ii]] - box_size_initial_y) &
-                      (data.y[im1] <= data.y[im0[ii]] + box_size_initial_y))[0]
-    z1_ind = np.where((data.z[im1] >= data.z[im0[ii]] - box_size_initial_z) &
-                      (data.z[im1] <= data.z[im0[ii]] + box_size_initial_z))[0]
+    x1_ind = np.where((data.x[im1] >= data.x[im0[ii]] - box_size_initial_x_lo) &
+                      (data.x[im1] <= data.x[im0[ii]] + box_size_initial_x_hi))[0]
+    y1_ind = np.where((data.y[im1] >= data.y[im0[ii]] - box_size_initial_y_lo) &
+                      (data.y[im1] <= data.y[im0[ii]] + box_size_initial_y_hi))[0]
+    z1_ind = np.where((data.z[im1] >= data.z[im0[ii]] - box_size_initial_z_lo) &
+                      (data.z[im1] <= data.z[im0[ii]] + box_size_initial_z_hi))[0]
 
     ind1_ = np.intersect1d(x1_ind, y1_ind)
     ind1 = np.intersect1d(ind1_, z1_ind)

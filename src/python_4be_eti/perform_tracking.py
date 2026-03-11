@@ -23,12 +23,27 @@ class FourFrameTracking():
         min_track_length=2,
         write_paraview=False,
         write_failed_tracks=False,
+        *,
+        box_size_initial_x_lo=None,
+        box_size_initial_x_hi=None,
+        box_size_initial_y_lo=None,
+        box_size_initial_y_hi=None,
+        box_size_initial_z_lo=None,
+        box_size_initial_z_hi=None,
     ):
         self.path = path
         self.filename = filename
         self.box_size_x = box_size_x
         self.box_size_y = box_size_y
         self.box_size_z = box_size_z
+        # Asymmetric initial box: lo/hi are half-widths in negative/positive direction.
+        # If None, use symmetric (box_size_* for both sides).
+        self.box_size_initial_x_lo = box_size_initial_x_lo if box_size_initial_x_lo is not None else box_size_x
+        self.box_size_initial_x_hi = box_size_initial_x_hi if box_size_initial_x_hi is not None else box_size_x
+        self.box_size_initial_y_lo = box_size_initial_y_lo if box_size_initial_y_lo is not None else box_size_y
+        self.box_size_initial_y_hi = box_size_initial_y_hi if box_size_initial_y_hi is not None else box_size_y
+        self.box_size_initial_z_lo = box_size_initial_z_lo if box_size_initial_z_lo is not None else box_size_z
+        self.box_size_initial_z_hi = box_size_initial_z_hi if box_size_initial_z_hi is not None else box_size_z
         self.dimension = '3d'
         self.box_size_track = box_size_track
         self.dt = dt
@@ -68,8 +83,11 @@ class FourFrameTracking():
                     )
                 fut = executor.submit(
                     process_batch, batch, self.path, self.filename,
-                    self.dimension, self.box_size_track, self.box_size_x,
-                    self.box_size_y, self.box_size_z, start_time,
+                    self.dimension, self.box_size_track,
+                    self.box_size_initial_x_lo, self.box_size_initial_x_hi,
+                    self.box_size_initial_y_lo, self.box_size_initial_y_hi,
+                    self.box_size_initial_z_lo, self.box_size_initial_z_hi,
+                    start_time,
                     show_progress=use_progress,
                     output_h5part=output_h5part,
                     dt=self.dt,

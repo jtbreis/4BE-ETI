@@ -14,8 +14,11 @@ from .particle_tracking_code import no_previous_tracks_3d, no_previous_tracks, p
 
 
 def process_frame_range(frame_range, folder, filename, dimension,
-                        box_size, box_size_initial_x, box_size_initial_y,
-                        box_size_initial_z, start_time, show_progress=True,
+                        box_size,
+                        box_size_initial_x_lo, box_size_initial_x_hi,
+                        box_size_initial_y_lo, box_size_initial_y_hi,
+                        box_size_initial_z_lo, box_size_initial_z_hi,
+                        start_time, show_progress=True,
                         output_h5part=None, dt=1.0, write_failed_tracks=False):
     print("  Loading frames {}-{}...".format(frame_range[0], frame_range[-1]), flush=True)
     data_range = load_data_h5(
@@ -57,14 +60,16 @@ def process_frame_range(frame_range, folder, filename, dimension,
                 if dimension == '3d':
                     data_range = no_previous_tracks_3d(
                         data_range, jj, ii, box_size,
-                        box_size_initial_x, box_size_initial_y,
-                        box_size_initial_z,
+                        box_size_initial_x_lo, box_size_initial_x_hi,
+                        box_size_initial_y_lo, box_size_initial_y_hi,
+                        box_size_initial_z_lo, box_size_initial_z_hi,
                         _im0=idx_0, _im1=idx_1, _im2=idx_2, _im3=idx_3,
                     )
                 else:
                     data_range = no_previous_tracks(
                         data_range, jj, ii, box_size,
-                        box_size_initial_x, box_size_initial_y
+                        box_size_initial_x_lo, box_size_initial_x_hi,
+                        box_size_initial_y_lo, box_size_initial_y_hi,
                     )
             else:
                 if dimension == '3d':
@@ -83,16 +88,22 @@ def process_frame_range(frame_range, folder, filename, dimension,
 
 
 def process_batch(batch, folder, filename, dimension,
-                  box_size, box_size_initial_x, box_size_initial_y,
-                  box_size_initial_z, start_time, show_progress=True,
+                  box_size,
+                  box_size_initial_x_lo, box_size_initial_x_hi,
+                  box_size_initial_y_lo, box_size_initial_y_hi,
+                  box_size_initial_z_lo, box_size_initial_z_hi,
+                  start_time, show_progress=True,
                   output_h5part=None, dt=1.0, write_failed_tracks=False):
     print("[Worker] Processing batch ({} frame ranges)...".format(len(batch)), flush=True)
     results = []
     for frame_range in batch:
         progress = process_frame_range(
             frame_range, folder, filename, dimension,
-            box_size, box_size_initial_x, box_size_initial_y,
-            box_size_initial_z, start_time, show_progress=show_progress,
+            box_size,
+            box_size_initial_x_lo, box_size_initial_x_hi,
+            box_size_initial_y_lo, box_size_initial_y_hi,
+            box_size_initial_z_lo, box_size_initial_z_hi,
+            start_time, show_progress=show_progress,
             output_h5part=output_h5part,
             dt=dt,
             write_failed_tracks=write_failed_tracks,

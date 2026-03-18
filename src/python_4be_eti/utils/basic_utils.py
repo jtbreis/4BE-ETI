@@ -144,7 +144,8 @@ def load_data_h5(filename, frame_range):
             slices[idx] = np.ones([n_pts, 1], dtype=int) * frame_idx
 
             if 'diameter' in frame and 'intensity' in frame and 'mass' in frame:
-                d = np.array(frame['diameter'])   # (n_pts,) or (n_pts, maxcams)
+                # (n_pts,) or (n_pts, maxcams)
+                d = np.array(frame['diameter'])
                 i = np.array(frame['intensity'])
                 m = np.array(frame['mass'])
                 if d.ndim == 2:
@@ -156,8 +157,10 @@ def load_data_h5(filename, frame_range):
                 mass_list[idx] = m.reshape(-1, 1)
                 has_props = True
             else:
-                diameter_list[idx] = np.full((n_pts, 1), np.nan, dtype=np.float64)
-                intensity_list[idx] = np.full((n_pts, 1), np.nan, dtype=np.float64)
+                diameter_list[idx] = np.full(
+                    (n_pts, 1), np.nan, dtype=np.float64)
+                intensity_list[idx] = np.full(
+                    (n_pts, 1), np.nan, dtype=np.float64)
                 mass_list[idx] = np.full((n_pts, 1), np.nan, dtype=np.float64)
 
         data.x = np.concatenate(np.vstack(x))
@@ -213,24 +216,172 @@ def merge_tracks_h5part_parts(folder):
     logging.info("Merged %d part file(s) into %s", len(part_files), out_path)
 
 
-def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, include_failed_tracks=False):
+def _build_tracks_from_data(data: a, frame_range, include_failed_tracks):
+    """Build list of (track_id, frames, x, y, z) for each track present in frame_range."""
+    frame_range_set = set(frame_range)
+    if include_failed_tracks:
+        mask = np.isin(data.Slice, frame_range)
+    else:
+        mask = np.isin(data.Slice, frame_range) & (data.Count != 0)
+    ids = data.Count[mask]
+    frames = data.Slice[mask]
+    xx = data.x[mask]
+    yy = data.y[mask]
+    zz = data.z[mask]
+    tracks = {}
+    for i in range(len(ids)):
+        tid = int(ids[i])
+        if tid not in tracks:
+            tracks[tid] = []
+        tracks[tid].append((int(frames[i]), float(
+            xx[i]), float(yy[i]), float(zz[i])))
+    out = []
+    for tid, points in tracks.items():
+        points.sort(key=lambda p: p[0])
+        frames_arr = np.array([p[0] for p in points])
+        x_arr = np.array([p[1] for p in points])
+        y_arr = np.array([p[2] for p in points])
+        z_arr = np.array([p[3] for p in points])
+        out.append((tid, frames_arr, x_arr, y_arr, z_arr))
+    return out
+
+
+def _bspline_velocity_acceleration_lookup(data: a, frame_range, dt, include_failed_tracks):
+    """
+    For each track with at least 4 points, compute velocity and acceleration at each frame
+    using a cubic B-spline fit. Returns dict (track_id, frame) -> (vx, vy, vz, ax, ay, az).
+    """
+    try:
+        from ..track import velocity_acceleration_from_bspline
+    except ImportError:
+        return {}
+    tracks = _build_tracks_from_data(data, frame_range, include_failed_tracks)
+    lookup = {}
+    for tid, frames_arr, x_arr, y_arr, z_arr in tracks:
+        if len(frames_arr) < 4:
+            continue
+        t = frames_arr.astype(np.float64) * dt
+        try:
+            vx, vy, vz, ax, ay, az = velocity_acceleration_from_bspline(
+                t, x_arr, y_arr, z_arr)
+        except Exception:
+            continue
+        for i, frame in enumerate(frames_arr):
+            lookup[(tid, int(frame))] = (
+                vx[i], vy[i], vz[i], ax[i], ay[i], az[i])
+    return lookup
+
+
+def _write_bspline_curves_paraview(data: a, frame_range, dt, filepath, include_failed_tracks=False, num_samples=50):
+    """
+    Write B-spline curves for every 4-frame track to a VTK file viewable in ParaView.
+    Each track is rendered as a polyline sampled at num_samples points along the curve.
+    """
+    try:
+        from ..track import sample_bspline_curve
+    except ImportError:
+        logging.warning(
+            "Cannot write B-spline curves: track.sample_bspline_curve not available")
+        return
+    tracks = _build_tracks_from_data(data, frame_range, include_failed_tracks)
+    polylines = []
+    for tid, frames_arr, x_arr, y_arr, z_arr in tracks:
+        if len(frames_arr) != 4:
+            continue
+        t = frames_arr.astype(np.float64) * dt
+        try:
+            _, x_curve, y_curve, z_curve = sample_bspline_curve(
+                t, x_arr, y_arr, z_arr, num_samples=num_samples)
+        except Exception:
+            continue
+        polylines.append(np.column_stack([x_curve, y_curve, z_curve]))
+    if not polylines:
+        return
+    points_list = []
+    lines_list = []
+    pt_offset = 0
+    for pts in polylines:
+        n_pts = len(pts)
+        points_list.append(pts)
+        lines_list.append((n_pts, list(range(pt_offset, pt_offset + n_pts))))
+        pt_offset += n_pts
+    all_points = np.vstack(points_list).astype(np.float64)
+    n_points = all_points.shape[0]
+    n_lines = len(polylines)
+    # VTK legacy format: LINES n_lines (total_ints) then per line: num_pts i0 i1 ...
+    line_data = []
+    for n_pts, indices in lines_list:
+        line_data.append(n_pts)
+        line_data.extend(indices)
+    with open(filepath, 'w') as vtk:
+        vtk.write("# vtk DataFile Version 3.0\n")
+        vtk.write("B-spline curves (4-frame tracks)\n")
+        vtk.write("ASCII\n")
+        vtk.write("DATASET POLYDATA\n")
+        vtk.write("POINTS %d float\n" % n_points)
+        for i in range(n_points):
+            vtk.write("%.6g %.6g %.6g\n" %
+                      (all_points[i, 0], all_points[i, 1], all_points[i, 2]))
+        vtk.write("LINES %d %d\n" % (n_lines, len(line_data)))
+        idx = 0
+        while idx < len(line_data):
+            n_pts = line_data[idx]
+            vtk.write(str(n_pts))
+            for j in range(1, n_pts + 1):
+                vtk.write(" %d" % line_data[idx + j])
+            vtk.write("\n")
+            idx += 1 + n_pts
+    logging.info("Wrote B-spline curves to %s (%d polylines)",
+                 filepath, n_lines)
+
+
+def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, include_failed_tracks=False,
+                  use_bspline=False):
     """Write track data to HDF5. If output_h5part is set (parallel mode), write to that file instead of folder/tracks.h5part.
     Velocity (vx, vy, vz) and acceleration (ax, ay, az) are computed from position history and written when dt is provided.
+    If use_bspline is True, velocity and acceleration are computed from a cubic B-spline fit (tracks with at least 4 points).
     If include_failed_tracks is True, particles with Count==0 (tracking failed) are also written; their id is 0 and a 'tracked' dataset (bool) is written per step.
+    Only particles whose track appears in all 4 frames of the block are given a tracked index (treated as tracked).
     """
-    filename = output_h5part if output_h5part else os.path.join(folder, 'tracks.h5part')
+    filename = output_h5part if output_h5part else os.path.join(
+        folder, 'tracks.h5part')
     frame_range_set = set(frame_range)
     dt = float(dt) if dt is not None else 1.0
+
+    # Only treat a track as tracked (non-zero id counts) if it appears in a full 4 frames
+    max_id = int(np.max(data.Count)) if data.Count.size else 0
+    id_has_4_frames = np.zeros(max(1, max_id + 1), dtype=bool)
+    if max_id > 0:
+        in_range = np.isin(data.Slice, frame_range)
+        for tid in np.unique(data.Count[data.Count != 0]):
+            tid = int(tid)
+            n_frames = len(
+                np.unique(data.Slice[(data.Count == tid) & in_range]))
+            id_has_4_frames[tid] = (n_frames >= 4)
+
+    bspline_lookup = {}
+    if use_bspline:
+        bspline_lookup = _bspline_velocity_acceleration_lookup(
+            data, frame_range, dt, include_failed_tracks
+        )
+    # B-spline curves VTK is written from perform_tracking after merge so one file contains all 4-frame tracks
 
     with h5py.File(filename, 'a') as f:
         print(frame_range)
         for frame in frame_range:
-            grp = f.create_group(f"Step#{frame}")
+            step_name = f"Step#{frame}"
+            if step_name in f:
+                del f[step_name]
+            grp = f.create_group(step_name)
 
             if include_failed_tracks:
                 mask = (data.Slice == frame)
             else:
+                # Only include particles whose track appears in 4 frames
                 mask = (data.Slice == frame) & (data.Count != 0)
+                if max_id > 0:
+                    mask = mask & id_has_4_frames[np.asarray(
+                        data.Count, dtype=int)]
             n = int(np.sum(mask))
             ids_cur = data.Count[mask]
             x_cur = data.x[mask]
@@ -241,63 +392,79 @@ def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, incl
             grp.create_dataset('y', data=y_cur)
             grp.create_dataset('z', data=z_cur)
 
-            # Velocity: (position - position_prev) / dt, NaN where no previous point
-            vx = np.full(n, np.nan, dtype=np.float64)
-            vy = np.full(n, np.nan, dtype=np.float64)
-            vz = np.full(n, np.nan, dtype=np.float64)
+            # Build prev-frame index once per frame (for finite-difference fallback)
+            id_to_idx_prev = None
+            x_prev_arr = y_prev_arr = z_prev_arr = None
+            id_to_idx_prev_prev = None
+            x_prev_prev_arr = y_prev_prev_arr = z_prev_prev_arr = None
             if (frame - 1) in frame_range_set:
                 mask_prev = (data.Slice == frame - 1) & (data.Count != 0)
                 ids_prev = data.Count[mask_prev]
-                id_to_idx = {}
-                for idx, tid in enumerate(ids_prev):
-                    id_to_idx[int(tid)] = idx
-                x_prev = data.x[mask_prev]
-                y_prev = data.y[mask_prev]
-                z_prev = data.z[mask_prev]
-                for i in range(n):
-                    tid = int(ids_cur[i])
-                    if tid in id_to_idx:
-                        j = id_to_idx[tid]
-                        vx[i] = (x_cur[i] - x_prev[j]) / dt
-                        vy[i] = (y_cur[i] - y_prev[j]) / dt
-                        vz[i] = (z_cur[i] - z_prev[j]) / dt
+                id_to_idx_prev = {int(t): idx for idx,
+                                  t in enumerate(ids_prev)}
+                x_prev_arr = data.x[mask_prev]
+                y_prev_arr = data.y[mask_prev]
+                z_prev_arr = data.z[mask_prev]
+            if (frame - 2) in frame_range_set:
+                mask_prev_prev = (data.Slice == frame - 2) & (data.Count != 0)
+                ids_prev_prev = data.Count[mask_prev_prev]
+                id_to_idx_prev_prev = {
+                    int(t): idx for idx, t in enumerate(ids_prev_prev)}
+                x_prev_prev_arr = data.x[mask_prev_prev]
+                y_prev_prev_arr = data.y[mask_prev_prev]
+                z_prev_prev_arr = data.z[mask_prev_prev]
+
+            # Velocity: from B-spline lookup if available, else finite difference
+            vx = np.full(n, np.nan, dtype=np.float64)
+            vy = np.full(n, np.nan, dtype=np.float64)
+            vz = np.full(n, np.nan, dtype=np.float64)
+            for i in range(n):
+                tid = int(ids_cur[i])
+                key = (tid, frame)
+                vals = bspline_lookup.get(key, None)
+                if vals is not None:
+                    vx[i], vy[i], vz[i] = vals[0], vals[1], vals[2]
+                elif id_to_idx_prev is not None and tid in id_to_idx_prev:
+                    j = id_to_idx_prev[tid]
+                    vx[i] = (x_cur[i] - x_prev_arr[j]) / dt
+                    vy[i] = (y_cur[i] - y_prev_arr[j]) / dt
+                    vz[i] = (z_cur[i] - z_prev_arr[j]) / dt
             grp.create_dataset('vx', data=vx)
             grp.create_dataset('vy', data=vy)
             grp.create_dataset('vz', data=vz)
 
-            # Acceleration: (x_f - 2*x_f-1 + x_f-2) / dt^2, NaN where track history too short
+            # Acceleration: from B-spline lookup if available, else finite difference
             ax = np.full(n, np.nan, dtype=np.float64)
             ay = np.full(n, np.nan, dtype=np.float64)
             az = np.full(n, np.nan, dtype=np.float64)
-            if (frame - 1) in frame_range_set and (frame - 2) in frame_range_set:
-                mask_prev = (data.Slice == frame - 1) & (data.Count != 0)
-                mask_prev_prev = (data.Slice == frame - 2) & (data.Count != 0)
-                ids_prev = data.Count[mask_prev]
-                ids_prev_prev = data.Count[mask_prev_prev]
-                id_to_idx_prev = {int(tid): idx for idx, tid in enumerate(ids_prev)}
-                id_to_idx_prev_prev = {int(tid): idx for idx, tid in enumerate(ids_prev_prev)}
-                x_prev = data.x[mask_prev]
-                y_prev = data.y[mask_prev]
-                z_prev = data.z[mask_prev]
-                x_prev_prev = data.x[mask_prev_prev]
-                y_prev_prev = data.y[mask_prev_prev]
-                z_prev_prev = data.z[mask_prev_prev]
-                dt2 = dt * dt
-                for i in range(n):
-                    tid = int(ids_cur[i])
-                    if tid in id_to_idx_prev and tid in id_to_idx_prev_prev:
-                        j = id_to_idx_prev[tid]
-                        k = id_to_idx_prev_prev[tid]
-                        ax[i] = (x_cur[i] - 2 * x_prev[j] + x_prev_prev[k]) / dt2
-                        ay[i] = (y_cur[i] - 2 * y_prev[j] + y_prev_prev[k]) / dt2
-                        az[i] = (z_cur[i] - 2 * z_prev[j] + z_prev_prev[k]) / dt2
+            dt2 = dt * dt
+            for i in range(n):
+                tid = int(ids_cur[i])
+                key = (tid, frame)
+                vals = bspline_lookup.get(key, None)
+                if vals is not None:
+                    ax[i], ay[i], az[i] = vals[3], vals[4], vals[5]
+                elif id_to_idx_prev is not None and id_to_idx_prev_prev is not None and tid in id_to_idx_prev and tid in id_to_idx_prev_prev:
+                    j = id_to_idx_prev[tid]
+                    k = id_to_idx_prev_prev[tid]
+                    ax[i] = (x_cur[i] - 2 * x_prev_arr[j] +
+                             x_prev_prev_arr[k]) / dt2
+                    ay[i] = (y_cur[i] - 2 * y_prev_arr[j] +
+                             y_prev_prev_arr[k]) / dt2
+                    az[i] = (z_cur[i] - 2 * z_prev_arr[j] +
+                             z_prev_prev_arr[k]) / dt2
             grp.create_dataset('ax', data=ax)
             grp.create_dataset('ay', data=ay)
             grp.create_dataset('az', data=az)
 
             grp.create_dataset("id", data=ids_cur)
             if include_failed_tracks:
-                grp.create_dataset('tracked', data=(ids_cur != 0).astype(np.uint8))  # 1 = tracked, 0 = failed
+                # 1 = tracked for full 4 frames, 0 = failed or not yet 4-frame
+                tid_arr = np.asarray(ids_cur, dtype=int)
+                in_range = (tid_arr > 0) & (tid_arr < len(id_has_4_frames))
+                tracked = np.where(
+                    in_range & id_has_4_frames[tid_arr], 1, 0).astype(np.uint8)
+                grp.create_dataset('tracked', data=tracked)
             if hasattr(data, 'diameter'):
                 grp.create_dataset('diameter', data=data.diameter[mask])
                 grp.create_dataset('intensity', data=data.intensity[mask])

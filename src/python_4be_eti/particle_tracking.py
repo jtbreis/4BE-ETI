@@ -19,10 +19,14 @@ def process_frame_range(frame_range, folder, filename, dimension,
                         box_size_initial_y_lo, box_size_initial_y_hi,
                         box_size_initial_z_lo, box_size_initial_z_hi,
                         start_time, show_progress=True,
-                        output_h5part=None, dt=1.0, write_failed_tracks=False):
-    print("  Loading frames {}-{}...".format(frame_range[0], frame_range[-1]), flush=True)
+                        output_h5part=None, dt=1.0, write_failed_tracks=False,
+                        use_bspline=False, export_bspline_paraview=False,
+                        rep_rate=None, run=0):
+    print(
+        "  Loading frames {}-{} from HDF5...".format(frame_range[0], frame_range[-1]), flush=True)
     data_range = load_data_h5(
         os.path.join(folder, filename), frame_range)
+    print("  Loaded {} particles total, starting tracking...".format(len(data_range.x)), flush=True)
 
     frame_steps = list(range(min(frame_range), max(frame_range)))
     iterator = tqdm(
@@ -47,7 +51,8 @@ def process_frame_range(frame_range, folder, filename, dimension,
             idx_1 = np.where(data_range.Slice == jj + 1)[0]
             idx_2 = np.where(data_range.Slice == jj + 2)[0]
             idx_3 = np.where(data_range.Slice == jj + 3)[0]
-            idx_m1 = np.where(data_range.Slice == jj - 1)[0] if jj > min(frame_range) else None
+            idx_m1 = np.where(data_range.Slice == jj -
+                              1)[0] if jj > min(frame_range) else None
         else:
             idx_0 = idx_1 = idx_2 = idx_3 = idx_m1 = None
 
@@ -55,7 +60,8 @@ def process_frame_range(frame_range, folder, filename, dimension,
         for ii in range(n_particles):
             # Heartbeat every 1000 particles so you can see progress (avoids "stuck" impression)
             if (ii + 1) % 1000 == 0 or ii == 0:
-                print("  frame {}: particle {}/{}".format(jj, ii + 1, n_particles), flush=True)
+                print("  frame {}: particle {}/{}".format(jj,
+                      ii + 1, n_particles), flush=True)
             if data_range.Count[imInit[ii]] == 0:
                 if dimension == '3d':
                     data_range = no_previous_tracks_3d(
@@ -83,7 +89,24 @@ def process_frame_range(frame_range, folder, filename, dimension,
         if len(data_range.Count[data_range.Count == -1]) > 0:
             data_range.Count[data_range.Count == -1] = 0
 
-    write_data_h5(data_range, folder, frame_range, output_h5part=output_h5part, dt=dt, include_failed_tracks=write_failed_tracks)
+    write_data_h5(data_range, folder, frame_range, output_h5part=output_h5part,
+                  dt=dt, include_failed_tracks=write_failed_tracks, use_bspline=use_bspline)
+    # Export B-spline curves after each frame range so partial results are saved if process is killed
+    if export_bspline_paraview and use_bspline and dt is not None and rep_rate is not None:
+        try:
+            from .io.read_h5 import load_tracks_from_h5part
+            from .io.write_paraview import write_bspline_curves_vtk
+            h5_path = output_h5part if output_h5part else os.path.join(folder, "tracks.h5part")
+            tracks = load_tracks_from_h5part(
+                folder, dt, rep_rate, run=run, min_length=2,
+                use_bspline=True, filepath=h5_path,
+            )
+            if tracks:
+                out_path = os.path.join(folder, "bspline_curves.vtk")
+                write_bspline_curves_vtk(tracks, out_path)
+                print(f"  Wrote B-spline curves to {out_path}", flush=True)
+        except Exception as e:
+            logging.warning("Could not export B-spline curves after frame range %s: %s", frame_range, e)
     return f"[PID {os.getpid()}] Finished frame range {frame_range} in {time.time() - start_time:.1f}s)"
 
 
@@ -93,10 +116,14 @@ def process_batch(batch, folder, filename, dimension,
                   box_size_initial_y_lo, box_size_initial_y_hi,
                   box_size_initial_z_lo, box_size_initial_z_hi,
                   start_time, show_progress=True,
-                  output_h5part=None, dt=1.0, write_failed_tracks=False):
-    print("[Worker] Processing batch ({} frame ranges)...".format(len(batch)), flush=True)
+                  output_h5part=None, dt=1.0, write_failed_tracks=False,
+                  use_bspline=False, export_bspline_paraview=False,
+                  rep_rate=None, run=0):
+    print("[Worker] Processing batch ({} frame ranges)...".format(
+        len(batch)), flush=True)
     results = []
-    for frame_range in batch:
+    for idx, frame_range in enumerate(batch):
+        print(f"  Batch: starting frame range {idx + 1}/{len(batch)} {frame_range}", flush=True)
         progress = process_frame_range(
             frame_range, folder, filename, dimension,
             box_size,
@@ -107,6 +134,10 @@ def process_batch(batch, folder, filename, dimension,
             output_h5part=output_h5part,
             dt=dt,
             write_failed_tracks=write_failed_tracks,
+            use_bspline=use_bspline,
+            export_bspline_paraview=export_bspline_paraview,
+            rep_rate=rep_rate,
+            run=run,
         )
         print(progress)
     return results

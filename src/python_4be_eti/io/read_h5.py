@@ -4,16 +4,19 @@ import h5py
 import numpy as np
 
 
-def load_tracks_from_h5part(folder, dt, rep_rate, run=0, min_length=2):
+def load_tracks_from_h5part(folder, dt, rep_rate, run=0, min_length=2, use_bspline=False, filepath=None):
     """
     Load Track objects from 4BE-ETI output (tracks.h5part with Step#frame groups).
 
     Used to export tracks to ParaView format from the same folder.
+    If use_bspline is True, velocity and acceleration are computed from a cubic B-spline
+    fit (for tracks with at least 4 points); otherwise finite differences are used.
+    If filepath is given, load from that file; otherwise use folder/tracks.h5part.
     """
     import logging
     from ..track import Track
 
-    filename = os.path.join(folder, "tracks.h5part")
+    filename = filepath if filepath is not None else os.path.join(folder, "tracks.h5part")
     if not os.path.isfile(filename):
         logging.warning("No tracks loaded: %s does not exist.", filename)
         return []
@@ -71,8 +74,8 @@ def load_tracks_from_h5part(folder, dt, rep_rate, run=0, min_length=2):
             tr.diameter = D
             tr.intensity = I
             tr.mass = M
-            tr.compute_velocity()
-            tr.compute_acceleration()
+            tr.compute_velocity(use_bspline=use_bspline)
+            tr.compute_acceleration(use_bspline=use_bspline)
             tracks.append(tr)
     return tracks
 

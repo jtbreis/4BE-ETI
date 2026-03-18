@@ -9,6 +9,7 @@ When per_snapshot=True, one grid per 4-frame track is written in a Temporal coll
 so you can view each track individually in ParaView by stepping through the time slider.
 """
 
+import logging
 import os
 import numpy as np
 import h5py
@@ -16,6 +17,77 @@ import h5py
 
 # XDMF Mixed topology: 2 = POLYLINE
 _POLYLINE_TYPE = 2
+
+
+def write_bspline_curves_vtk(tracks, filepath, num_samples=50):
+    """
+    Write B-spline curves for 4-frame tracks to a VTK file viewable in ParaView.
+
+    Parameters
+    ----------
+    tracks : sequence of Track
+        Track objects; only those with track_length == 4 are used.
+    filepath : str
+        Output path (e.g. 'folder/bspline_curves.vtk').
+    num_samples : int
+        Number of points to sample along each B-spline curve.
+    """
+    from ..track import sample_bspline_curve
+
+    tracks_4 = [t for t in tracks if len(t.X) == 4]
+    if not tracks_4:
+        logging.warning("No 4-frame tracks for B-spline VTK export")
+        return
+
+    polylines = []
+    for tr in tracks_4:
+        t = np.asarray(tr.time) + np.arange(4) * tr.dt
+        try:
+            _, x_curve, y_curve, z_curve = sample_bspline_curve(
+                t, np.asarray(tr.X), np.asarray(tr.Y), np.asarray(tr.Z),
+                num_samples=num_samples,
+            )
+        except Exception:
+            continue
+        polylines.append(np.column_stack([x_curve, y_curve, z_curve]))
+
+    if not polylines:
+        return
+
+    points_list = []
+    lines_list = []
+    pt_offset = 0
+    for pts in polylines:
+        n_pts = len(pts)
+        points_list.append(pts)
+        lines_list.append((n_pts, list(range(pt_offset, pt_offset + n_pts))))
+        pt_offset += n_pts
+    all_points = np.vstack(points_list).astype(np.float64)
+    n_points = all_points.shape[0]
+    n_lines = len(polylines)
+    line_data = []
+    for n_pts, indices in lines_list:
+        line_data.append(n_pts)
+        line_data.extend(indices)
+
+    with open(filepath, 'w') as vtk:
+        vtk.write("# vtk DataFile Version 3.0\n")
+        vtk.write("B-spline curves (4-frame tracks)\n")
+        vtk.write("ASCII\n")
+        vtk.write("DATASET POLYDATA\n")
+        vtk.write("POINTS %d float\n" % n_points)
+        for i in range(n_points):
+            vtk.write("%.6g %.6g %.6g\n" % (all_points[i, 0], all_points[i, 1], all_points[i, 2]))
+        vtk.write("LINES %d %d\n" % (n_lines, len(line_data)))
+        idx = 0
+        while idx < len(line_data):
+            n_pts = line_data[idx]
+            vtk.write(str(n_pts))
+            for j in range(1, n_pts + 1):
+                vtk.write(" %d" % line_data[idx + j])
+            vtk.write("\n")
+            idx += 1 + n_pts
+    logging.info("Wrote B-spline curves to %s (%d polylines)", filepath, n_lines)
 
 
 def _single_track_geometry(tr):
@@ -34,12 +106,17 @@ def _single_track_geometry(tr):
     dt = getattr(tr, "dt", 0.0)
     t0 = getattr(tr, "time", 0.0)
     time_arr = (t0 + np.arange(n) * dt).astype(np.float64)
-    if hasattr(tr, "vmag") and tr.vmag is not None and len(tr.vmag) == n - 1:
-        v_at_pts = np.empty(n, dtype=np.float64)
-        v_at_pts[0] = tr.vmag[0]
-        v_at_pts[-1] = tr.vmag[-1]
-        if n > 2:
-            v_at_pts[1:-1] = 0.5 * (tr.vmag[:-1] + tr.vmag[1:])
+    if hasattr(tr, "vmag") and tr.vmag is not None:
+        if len(tr.vmag) == n:
+            v_at_pts = np.asarray(tr.vmag, dtype=np.float64)  # B-spline: one value per point
+        elif len(tr.vmag) == n - 1:
+            v_at_pts = np.empty(n, dtype=np.float64)
+            v_at_pts[0] = tr.vmag[0]
+            v_at_pts[-1] = tr.vmag[-1]
+            if n > 2:
+                v_at_pts[1:-1] = 0.5 * (tr.vmag[:-1] + tr.vmag[1:])
+        else:
+            v_at_pts = np.full(n, np.nan, dtype=np.float64)
     else:
         v_at_pts = np.full(n, np.nan, dtype=np.float64)
     diameter_pts = np.asarray(getattr(tr, "diameter", np.full(n, np.nan))).astype(np.float64)
@@ -83,14 +160,19 @@ def _tracks_to_geometry(tracks):
         dt = getattr(tr, 'dt', 0.0)
         t0 = getattr(tr, 'time', 0.0)
         time_list.append(t0 + np.arange(n) * dt)
-        # Velocity magnitude at points (vmag is length n-1 between points)
-        if hasattr(tr, 'vmag') and tr.vmag is not None and len(tr.vmag) == n - 1:
-            v_at_pts = np.empty(n)
-            v_at_pts[0] = tr.vmag[0]
-            v_at_pts[-1] = tr.vmag[-1]
-            if n > 2:
-                v_at_pts[1:-1] = 0.5 * (tr.vmag[:-1] + tr.vmag[1:])
-            vmag_at_points_list.append(v_at_pts)
+        # Velocity magnitude at points (vmag length n = B-spline, n-1 = finite diff)
+        if hasattr(tr, 'vmag') and tr.vmag is not None:
+            if len(tr.vmag) == n:
+                vmag_at_points_list.append(np.asarray(tr.vmag, dtype=np.float64))
+            elif len(tr.vmag) == n - 1:
+                v_at_pts = np.empty(n)
+                v_at_pts[0] = tr.vmag[0]
+                v_at_pts[-1] = tr.vmag[-1]
+                if n > 2:
+                    v_at_pts[1:-1] = 0.5 * (tr.vmag[:-1] + tr.vmag[1:])
+                vmag_at_points_list.append(v_at_pts)
+            else:
+                vmag_at_points_list.append(np.full(n, np.nan))
         else:
             vmag_at_points_list.append(np.full(n, np.nan))
         d = getattr(tr, 'diameter', None)

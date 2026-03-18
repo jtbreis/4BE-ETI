@@ -23,6 +23,8 @@ class FourFrameTracking():
         min_track_length=2,
         write_paraview=False,
         write_failed_tracks=False,
+        use_bspline=False,
+        export_bspline_paraview=False,
         *,
         box_size_initial_x_lo=None,
         box_size_initial_x_hi=None,
@@ -52,6 +54,8 @@ class FourFrameTracking():
         self.min_track_length = min_track_length
         self.write_paraview = write_paraview
         self.write_failed_tracks = write_failed_tracks
+        self.use_bspline = use_bspline
+        self.export_bspline_paraview = export_bspline_paraview
         self.num_frames = get_nframes(
             os.path.join(path, filename))
         self.track_length = 4
@@ -92,6 +96,10 @@ class FourFrameTracking():
                     output_h5part=output_h5part,
                     dt=self.dt,
                     write_failed_tracks=self.write_failed_tracks,
+                    use_bspline=self.use_bspline,
+                    export_bspline_paraview=self.export_bspline_paraview,
+                    rep_rate=self.rep_rate,
+                    run=self.run,
                 )
                 futures.append(fut)
             for fut in futures:
@@ -105,6 +113,9 @@ class FourFrameTracking():
 
         if self.write_paraview and self.dt is not None and self.rep_rate is not None:
             self._export_paraview()
+
+        if self.export_bspline_paraview and self.use_bspline and self.dt is not None and self.rep_rate is not None:
+            self._export_bspline_curves_vtk()
 
     def _export_paraview(self):
         """Write HDF5 + XDMF for ParaView from tracks.h5part in self.path."""
@@ -133,3 +144,21 @@ class FourFrameTracking():
         )
         logging.info("Wrote ParaView files: %s.h5 and %s.xmf",
                      out_base, out_base)
+
+    def _export_bspline_curves_vtk(self):
+        """Write B-spline curves for 4-frame tracks to a VTK file (ParaView)."""
+        from .io.read_h5 import load_tracks_from_h5part
+        from .io.write_paraview import write_bspline_curves_vtk
+
+        tracks = load_tracks_from_h5part(
+            self.path,
+            self.dt,
+            self.rep_rate,
+            run=self.run,
+            min_length=2,
+        )
+        if not tracks:
+            logging.warning("No tracks to export B-spline curves; skipping.")
+            return
+        out_path = os.path.join(self.path, "bspline_curves.vtk")
+        write_bspline_curves_vtk(tracks, out_path)

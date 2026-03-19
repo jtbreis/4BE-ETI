@@ -21,7 +21,8 @@ def _filter_targets_by_box(im, x_pred, y_pred, z_pred, data, box_size):
     xlo, xhi = x_pred.min() - box_size, x_pred.max() + box_size
     ylo, yhi = y_pred.min() - box_size, y_pred.max() + box_size
     zlo, zhi = z_pred.min() - box_size, z_pred.max() + box_size
-    mask = (x >= xlo) & (x <= xhi) & (y >= ylo) & (y <= yhi) & (z >= zlo) & (z <= zhi)
+    mask = (x >= xlo) & (x <= xhi) & (y >= ylo) & (
+        y <= yhi) & (z >= zlo) & (z <= zhi)
     im_sub = im[mask]
     return im_sub if len(im_sub) <= MAX_TARGETS_MESH else im_sub[:MAX_TARGETS_MESH]
 
@@ -150,8 +151,8 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x_lo, box_size_i
             im - the current image number
             ii - the current particle in the image (im)
             box_size - size of the search box to use
-            box_size_initial_x_lo/hi, box_size_initial_y_lo/hi - half-widths for initial
-                search in negative/positive direction (x: [x0-lo, x0+hi], y: [y0-lo, y0+hi])
+            box_size_initial_x_lo/hi, box_size_initial_y_lo/hi - signed initial
+                search offsets from current particle (x: [x0+lo, x0+hi], y: [y0+lo, y0+hi])
     Outputs: data - the data array containing information about particles and
                     previous tracking results, now updated for the current
                     particle
@@ -161,10 +162,15 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x_lo, box_size_i
     im2 = np.where(data.Slice == im + 2)[0]
     im3 = np.where(data.Slice == im + 3)[0]
 
-    x1_ind = np.where((data.x[im1] >= data.x[im0[ii]] - box_size_initial_x_lo) &
-                      (data.x[im1] <= data.x[im0[ii]] + box_size_initial_x_hi))[0]
-    y1_ind = np.where((data.y[im1] >= data.y[im0[ii]] - box_size_initial_y_lo) &
-                      (data.y[im1] <= data.y[im0[ii]] + box_size_initial_y_hi))[0]
+    x0 = data.x[im0[ii]]
+    y0 = data.y[im0[ii]]
+    x_lo = x0 + min(box_size_initial_x_lo, box_size_initial_x_hi)
+    x_hi = x0 + max(box_size_initial_x_lo, box_size_initial_x_hi)
+    y_lo = y0 + min(box_size_initial_y_lo, box_size_initial_y_hi)
+    y_hi = y0 + max(box_size_initial_y_lo, box_size_initial_y_hi)
+
+    x1_ind = np.where((data.x[im1] >= x_lo) & (data.x[im1] <= x_hi))[0]
+    y1_ind = np.where((data.y[im1] >= y_lo) & (data.y[im1] <= y_hi))[0]
 
     ind1 = np.intersect1d(x1_ind, y1_ind)
 
@@ -285,7 +291,8 @@ def previous_tracks_3d(data, im, ii, box_size, _im0=None, _im1=None, _im2=None, 
     yPred3 = 2.5 * data.y[im2[ind2]] - 2 * data.y[im1[ii]] + 0.5 * y0
     zPred3 = 2.5 * data.z[im2[ind2]] - 2 * data.z[im1[ii]] + 0.5 * z0
 
-    im3_sub = _filter_targets_by_box(im3, xPred3, yPred3, zPred3, data, box_size)
+    im3_sub = _filter_targets_by_box(
+        im3, xPred3, yPred3, zPred3, data, box_size)
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3_sub])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3_sub])
     zPred3_gr, z3_gr = np.meshgrid(zPred3, data.z[im3_sub])
@@ -348,8 +355,8 @@ def no_previous_tracks_3d(data, im, ii, box_size,
             im - the current image number
             ii - the current particle in the image (im)
             box_size - size of the search box to use
-            box_size_initial_*_lo/hi - half-widths for initial search in negative/positive
-                direction per axis (e.g. x: [x0-x_lo, x0+x_hi])
+            box_size_initial_*_lo/hi - signed initial search offsets per axis
+                (e.g. x: [x0+lo, x0+hi], allows +0.5..+1.5 or -0.2..+3.0)
             _im0,_im1,_im2,_im3 - optional precomputed frame indices (avoids repeated np.where)
     Outputs: data - the data array containing information about particles and
                     previous tracking results, now updated for the current
@@ -363,12 +370,19 @@ def no_previous_tracks_3d(data, im, ii, box_size,
         im2 = np.where(data.Slice == im + 2)[0]
         im3 = np.where(data.Slice == im + 3)[0]
 
-    x1_ind = np.where((data.x[im1] >= data.x[im0[ii]] - box_size_initial_x_lo) &
-                      (data.x[im1] <= data.x[im0[ii]] + box_size_initial_x_hi))[0]
-    y1_ind = np.where((data.y[im1] >= data.y[im0[ii]] - box_size_initial_y_lo) &
-                      (data.y[im1] <= data.y[im0[ii]] + box_size_initial_y_hi))[0]
-    z1_ind = np.where((data.z[im1] >= data.z[im0[ii]] - box_size_initial_z_lo) &
-                      (data.z[im1] <= data.z[im0[ii]] + box_size_initial_z_hi))[0]
+    x0 = data.x[im0[ii]]
+    y0 = data.y[im0[ii]]
+    z0 = data.z[im0[ii]]
+    x_lo = x0 + min(box_size_initial_x_lo, box_size_initial_x_hi)
+    x_hi = x0 + max(box_size_initial_x_lo, box_size_initial_x_hi)
+    y_lo = y0 + min(box_size_initial_y_lo, box_size_initial_y_hi)
+    y_hi = y0 + max(box_size_initial_y_lo, box_size_initial_y_hi)
+    z_lo = z0 + min(box_size_initial_z_lo, box_size_initial_z_hi)
+    z_hi = z0 + max(box_size_initial_z_lo, box_size_initial_z_hi)
+
+    x1_ind = np.where((data.x[im1] >= x_lo) & (data.x[im1] <= x_hi))[0]
+    y1_ind = np.where((data.y[im1] >= y_lo) & (data.y[im1] <= y_hi))[0]
+    z1_ind = np.where((data.z[im1] >= z_lo) & (data.z[im1] <= z_hi))[0]
 
     ind1_ = np.intersect1d(x1_ind, y1_ind)
     ind1 = np.intersect1d(ind1_, z1_ind)
@@ -382,7 +396,8 @@ def no_previous_tracks_3d(data, im, ii, box_size,
     yPred2 = 2 * data.y[im1[ind1]] - data.y[im0[ii]]
     zPred2 = 2 * data.z[im1[ind1]] - data.z[im0[ii]]
 
-    im2_sub = _filter_targets_by_box(im2, xPred2, yPred2, zPred2, data, box_size)
+    im2_sub = _filter_targets_by_box(
+        im2, xPred2, yPred2, zPred2, data, box_size)
     xPred2_gr, x2_gr = np.meshgrid(xPred2, data.x[im2_sub])
     yPred2_gr, y2_gr = np.meshgrid(yPred2, data.y[im2_sub])
     zPred2_gr, z2_gr = np.meshgrid(zPred2, data.z[im2_sub])
@@ -410,7 +425,8 @@ def no_previous_tracks_3d(data, im, ii, box_size,
     zPred3 = 2.5 * data.z[im2_sub[ind2]] - 2 * \
         data.z[im1[ind1[ind2_pred]]] + 0.5 * data.z[im0[ii]]
 
-    im3_sub = _filter_targets_by_box(im3, xPred3, yPred3, zPred3, data, box_size)
+    im3_sub = _filter_targets_by_box(
+        im3, xPred3, yPred3, zPred3, data, box_size)
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3_sub])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3_sub])
     zPred3_gr, z3_gr = np.meshgrid(zPred3, data.z[im3_sub])

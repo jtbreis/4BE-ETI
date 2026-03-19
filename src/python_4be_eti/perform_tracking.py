@@ -38,13 +38,14 @@ class FourFrameTracking():
         self.box_size_x = box_size_x
         self.box_size_y = box_size_y
         self.box_size_z = box_size_z
-        # Asymmetric initial box: lo/hi are half-widths in negative/positive direction.
-        # If None, use symmetric (box_size_* for both sides).
-        self.box_size_initial_x_lo = box_size_initial_x_lo if box_size_initial_x_lo is not None else box_size_x
+        # Asymmetric initial box: lo/hi are signed offsets around current particle.
+        # Examples in x: (+0.5, +1.5) => [x+0.5, x+1.5], (-0.2, +3.0) => [x-0.2, x+3.0]
+        # If None, use symmetric defaults [-box_size_*, +box_size_*].
+        self.box_size_initial_x_lo = box_size_initial_x_lo if box_size_initial_x_lo is not None else -box_size_x
         self.box_size_initial_x_hi = box_size_initial_x_hi if box_size_initial_x_hi is not None else box_size_x
-        self.box_size_initial_y_lo = box_size_initial_y_lo if box_size_initial_y_lo is not None else box_size_y
+        self.box_size_initial_y_lo = box_size_initial_y_lo if box_size_initial_y_lo is not None else -box_size_y
         self.box_size_initial_y_hi = box_size_initial_y_hi if box_size_initial_y_hi is not None else box_size_y
-        self.box_size_initial_z_lo = box_size_initial_z_lo if box_size_initial_z_lo is not None else box_size_z
+        self.box_size_initial_z_lo = box_size_initial_z_lo if box_size_initial_z_lo is not None else -box_size_z
         self.box_size_initial_z_hi = box_size_initial_z_hi if box_size_initial_z_hi is not None else box_size_z
         self.dimension = '3d'
         self.box_size_track = box_size_track

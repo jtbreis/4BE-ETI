@@ -138,11 +138,24 @@ class FourFrameTracking():
             )
             return
         out_base = os.path.join(self.path, "tracks_paraview")
-        write_tracks_paraview(
-            tracks, out_base,
-            include_velocity_magnitude=True,
-            per_snapshot=True,
-        )
+        try:
+            write_tracks_paraview(
+                tracks,
+                out_base,
+                include_velocity_magnitude=True,
+                per_snapshot=True,
+            )
+        except MemoryError:
+            logging.warning(
+                "ParaView per-snapshot export ran out of memory for %s; retrying with compact single-grid export.",
+                out_base,
+            )
+            write_tracks_paraview(
+                tracks,
+                out_base,
+                include_velocity_magnitude=True,
+                per_snapshot=False,
+            )
         logging.info("Wrote ParaView files: %s.h5 and %s.xmf",
                      out_base, out_base)
 

@@ -36,6 +36,7 @@ def load_tracks_from_h5part(folder, dt, rep_rate, run=0, min_length=2, use_bspli
 
         step_keys.sort(key=frame_num)
         has_props = "diameter" in f[step_keys[0]]
+        has_tracked_flag = "tracked" in f[step_keys[0]]
         # Build per-track: track_id -> list of (frame, x, y, z, ...) sorted by frame
         tracks_raw = {}
         for key in step_keys:
@@ -45,12 +46,21 @@ def load_tracks_from_h5part(folder, dt, rep_rate, run=0, min_length=2, use_bspli
             y = np.asarray(grp["y"]).ravel()
             z = np.asarray(grp["z"]).ravel()
             id_ = np.asarray(grp["id"]).ravel().astype(int)
+            tracked = None
+            if has_tracked_flag:
+                tracked = np.asarray(grp["tracked"]).ravel().astype(np.uint8)
             if has_props:
                 d = np.asarray(grp["diameter"]).ravel()
                 intensity = np.asarray(grp["intensity"]).ravel()
                 m = np.asarray(grp["mass"]).ravel()
             for i in range(len(id_)):
                 tid = id_[i]
+                # Failed/untracked detections may use id=0 and can dominate memory if grouped.
+                # For track export, only keep valid tracked IDs.
+                if tid <= 0:
+                    continue
+                if tracked is not None and tracked[i] == 0:
+                    continue
                 if tid not in tracks_raw:
                     tracks_raw[tid] = []
                 if has_props:

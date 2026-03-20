@@ -373,6 +373,8 @@ def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, incl
             if step_name in f:
                 del f[step_name]
             grp = f.create_group(step_name)
+            # Physical time for ParaView (H5Part reader uses Time attribute per step)
+            grp.attrs["Time"] = float(frame * dt)
 
             if include_failed_tracks:
                 mask = (data.Slice == frame)

@@ -42,6 +42,17 @@ def finding_indices(x_ind, xPred_ind, y_ind, yPred_ind):
     return ind, ind_pred
 
 
+def predict_third_frame_position(p0, p1, p2):
+    """
+    Position at frame n+3 from p0,p1,p2 at n,n+1,n+2 (uniform Δt).
+
+    Unique quadratic through the three samples; equals the 4BE Taylor step
+    x^{n+3} = x^{n+1} + 2Δt v + (1/2)a(2Δt)^2 with Δt=1, v=p2-p1,
+    a = p2 - 2*p1 + p0.
+    """
+    return 3.0 * p2 - 3.0 * p1 + p0
+
+
 def previous_tracks(data, im, ii, box_size):
     """
     Runs the particle tracking code for a path that has already been started
@@ -78,8 +89,10 @@ def previous_tracks(data, im, ii, box_size):
             data.Count[im2[temp_loc]] = data.CountTemp[im2[temp_loc]]
         return data
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * data.x[im1[ii]] + 0.5 * x0
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * data.y[im1[ii]] + 0.5 * y0
+    xPred3 = predict_third_frame_position(
+        x0, data.x[im1[ii]], data.x[im2[ind2]])
+    yPred3 = predict_third_frame_position(
+        y0, data.y[im1[ii]], data.y[im2[ind2]])
 
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3])
@@ -122,7 +135,9 @@ def previous_tracks(data, im, ii, box_size):
     return data
 
 
-def no_previous_tracks(data, im, ii, box_size, box_size_initial_x, box_size_initial_y):
+def no_previous_tracks(data, im, ii, box_size,
+                       box_size_initial_x_lo, box_size_initial_x_hi,
+                       box_size_initial_y_lo, box_size_initial_y_hi):
     """
     Runs the particle tracking code for a path that has not already been started
     Inputs: data - the data array containing information about particles
@@ -130,6 +145,8 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x, box_size_init
             im - the current image number
             ii - the current particle in the image (im)
             box_size - size of the search box to use
+            box_size_initial_x_lo/hi, box_size_initial_y_lo/hi - signed offsets
+                from the seed (im0[ii]): search x in [x0+min(lo,hi), x0+max(lo,hi)].
     Outputs: data - the data array containing information about particles and
                     previous tracking results, now updated for the current
                     particle
@@ -139,10 +156,15 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x, box_size_init
     im2 = np.where(data.Slice == im + 2)[0]
     im3 = np.where(data.Slice == im + 3)[0]
 
-    x1_ind = np.where((data.x[im1] >= data.x[im0[ii]] - box_size_initial_x) &
-                      (data.x[im1] <= data.x[im0[ii]] + box_size_initial_x))[0]
-    y1_ind = np.where((data.y[im1] >= data.y[im0[ii]] - box_size_initial_y) &
-                      (data.y[im1] <= data.y[im0[ii]] + box_size_initial_y))[0]
+    x0 = data.x[im0[ii]]
+    y0 = data.y[im0[ii]]
+    x_lo = x0 + min(box_size_initial_x_lo, box_size_initial_x_hi)
+    x_hi = x0 + max(box_size_initial_x_lo, box_size_initial_x_hi)
+    y_lo = y0 + min(box_size_initial_y_lo, box_size_initial_y_hi)
+    y_hi = y0 + max(box_size_initial_y_lo, box_size_initial_y_hi)
+
+    x1_ind = np.where((data.x[im1] >= x_lo) & (data.x[im1] <= x_hi))[0]
+    y1_ind = np.where((data.y[im1] >= y_lo) & (data.y[im1] <= y_hi))[0]
 
     ind1 = np.intersect1d(x1_ind, y1_ind)
 
@@ -165,10 +187,16 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x, box_size_init
     if len(ind2) == 0:
         return data
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * \
-        data.x[im1[ind1[ind2_pred]]] + 0.5 * data.x[im0[ii]]
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * \
-        data.y[im1[ind1[ind2_pred]]] + 0.5 * data.y[im0[ii]]
+    xPred3 = predict_third_frame_position(
+        data.x[im0[ii]],
+        data.x[im1[ind1[ind2_pred]]],
+        data.x[im2[ind2]],
+    )
+    yPred3 = predict_third_frame_position(
+        data.y[im0[ii]],
+        data.y[im1[ind1[ind2_pred]]],
+        data.y[im2[ind2]],
+    )
 
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3])
@@ -253,9 +281,12 @@ def previous_tracks_3d(data, im, ii, box_size):
             data.Count[im2[temp_loc]] = data.CountTemp[im2[temp_loc]]
             return data
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * data.x[im1[ii]] + 0.5 * x0
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * data.y[im1[ii]] + 0.5 * y0
-    zPred3 = 2.5 * data.z[im2[ind2]] - 2 * data.z[im1[ii]] + 0.5 * z0
+    xPred3 = predict_third_frame_position(
+        x0, data.x[im1[ii]], data.x[im2[ind2]])
+    yPred3 = predict_third_frame_position(
+        y0, data.y[im1[ii]], data.y[im2[ind2]])
+    zPred3 = predict_third_frame_position(
+        z0, data.z[im1[ii]], data.z[im2[ind2]])
 
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3])
@@ -307,7 +338,18 @@ def previous_tracks_3d(data, im, ii, box_size):
     return data
 
 
-def no_previous_tracks_3d(data, im, ii, box_size, box_size_initial_x, box_size_initial_y, box_size_initial_z):
+def no_previous_tracks_3d(
+    data,
+    im,
+    ii,
+    box_size,
+    box_size_initial_x_lo,
+    box_size_initial_x_hi,
+    box_size_initial_y_lo,
+    box_size_initial_y_hi,
+    box_size_initial_z_lo,
+    box_size_initial_z_hi,
+):
     """
     Runs the particle tracking code for a path that has not already been started
     Inputs: data - the data array containing information about particles
@@ -315,6 +357,8 @@ def no_previous_tracks_3d(data, im, ii, box_size, box_size_initial_x, box_size_i
             im - the current image number
             ii - the current particle in the image (im)
             box_size - size of the search box to use
+            box_size_initial_*_lo/hi - signed offsets from the seed per axis
+                (e.g. x in [x0+min(lo,hi), x0+max(lo,hi)]).
     Outputs: data - the data array containing information about particles and
                     previous tracking results, now updated for the current
                     particle
@@ -324,12 +368,19 @@ def no_previous_tracks_3d(data, im, ii, box_size, box_size_initial_x, box_size_i
     im2 = np.where(data.Slice == im + 2)[0]
     im3 = np.where(data.Slice == im + 3)[0]
 
-    x1_ind = np.where((data.x[im1] >= data.x[im0[ii]] - box_size_initial_x) &
-                      (data.x[im1] <= data.x[im0[ii]] + box_size_initial_x))[0]
-    y1_ind = np.where((data.y[im1] >= data.y[im0[ii]] - box_size_initial_y) &
-                      (data.y[im1] <= data.y[im0[ii]] + box_size_initial_y))[0]
-    z1_ind = np.where((data.z[im1] >= data.z[im0[ii]] - box_size_initial_z) &
-                      (data.z[im1] <= data.z[im0[ii]] + box_size_initial_z))[0]
+    x0 = data.x[im0[ii]]
+    y0 = data.y[im0[ii]]
+    z0 = data.z[im0[ii]]
+    x_lo = x0 + min(box_size_initial_x_lo, box_size_initial_x_hi)
+    x_hi = x0 + max(box_size_initial_x_lo, box_size_initial_x_hi)
+    y_lo = y0 + min(box_size_initial_y_lo, box_size_initial_y_hi)
+    y_hi = y0 + max(box_size_initial_y_lo, box_size_initial_y_hi)
+    z_lo = z0 + min(box_size_initial_z_lo, box_size_initial_z_hi)
+    z_hi = z0 + max(box_size_initial_z_lo, box_size_initial_z_hi)
+
+    x1_ind = np.where((data.x[im1] >= x_lo) & (data.x[im1] <= x_hi))[0]
+    y1_ind = np.where((data.y[im1] >= y_lo) & (data.y[im1] <= y_hi))[0]
+    z1_ind = np.where((data.z[im1] >= z_lo) & (data.z[im1] <= z_hi))[0]
 
     ind1_ = np.intersect1d(x1_ind, y1_ind)
     ind1 = np.intersect1d(ind1_, z1_ind)
@@ -358,12 +409,21 @@ def no_previous_tracks_3d(data, im, ii, box_size, box_size_initial_x, box_size_i
     if len(ind2) == 0:
         return data
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * \
-        data.x[im1[ind1[ind2_pred]]] + 0.5 * data.x[im0[ii]]
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * \
-        data.y[im1[ind1[ind2_pred]]] + 0.5 * data.y[im0[ii]]
-    zPred3 = 2.5 * data.z[im2[ind2]] - 2 * \
-        data.z[im1[ind1[ind2_pred]]] + 0.5 * data.z[im0[ii]]
+    xPred3 = predict_third_frame_position(
+        data.x[im0[ii]],
+        data.x[im1[ind1[ind2_pred]]],
+        data.x[im2[ind2]],
+    )
+    yPred3 = predict_third_frame_position(
+        data.y[im0[ii]],
+        data.y[im1[ind1[ind2_pred]]],
+        data.y[im2[ind2]],
+    )
+    zPred3 = predict_third_frame_position(
+        data.z[im0[ii]],
+        data.z[im1[ind1[ind2_pred]]],
+        data.z[im2[ind2]],
+    )
 
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3])

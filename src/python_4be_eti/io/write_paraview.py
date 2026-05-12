@@ -41,7 +41,7 @@ def write_bspline_curves_vtk(tracks, filepath, num_samples=50):
 
     polylines = []
     for tr in tracks_4:
-        t = np.asarray(tr.time) + np.arange(4) * tr.dt
+        t = _track_time_array(tr)
         try:
             _, x_curve, y_curve, z_curve = sample_bspline_curve(
                 t, np.asarray(tr.X), np.asarray(tr.Y), np.asarray(tr.Z),
@@ -90,6 +90,45 @@ def write_bspline_curves_vtk(tracks, filepath, num_samples=50):
     logging.info("Wrote B-spline curves to %s (%d polylines)", filepath, n_lines)
 
 
+def _track_time_array(tr):
+    """Physical time (s) at each trajectory point; uses ``physical_times`` if set."""
+    n = len(tr.X)
+    pt = getattr(tr, "physical_times", None)
+    if pt is not None and len(pt) == n:
+        return np.asarray(pt, dtype=np.float64)
+    t0 = getattr(tr, "time", 0.0)
+    dt = getattr(tr, "dt", 0.0)
+    return (t0 + np.arange(n) * dt).astype(np.float64)
+
+
+def _track_attr_scalar_per_point(tr, name, n):
+    """One scalar per trajectory point for ParaView: mean over cameras if stored as (n, n_cams)."""
+    a = getattr(tr, name, None)
+    if a is None:
+        return np.full(n, np.nan, dtype=np.float64)
+    arr = np.asarray(a, dtype=np.float64)
+    if arr.ndim == 2 and arr.shape[0] == n:
+        return np.nanmean(arr, axis=1)
+    arr = arr.ravel()
+    if arr.size == n:
+        return arr
+    return np.full(n, np.nan, dtype=np.float64)
+
+
+def _track_attr_components_per_point(tr, name, n):
+    """Per-ray components per trajectory point as shape (n, n_components)."""
+    a = getattr(tr, name, None)
+    if a is None:
+        return np.full((n, 0), np.nan, dtype=np.float64)
+    arr = np.asarray(a, dtype=np.float64)
+    if arr.ndim == 2 and arr.shape[0] == n:
+        return arr
+    arr = arr.ravel()
+    if arr.size == n:
+        return arr.reshape(n, 1)
+    return np.full((n, 0), np.nan, dtype=np.float64)
+
+
 def _single_track_geometry(tr):
     """Points, connectivity, and point attributes for one track (one snapshot)."""
     n = len(tr.X)
@@ -103,9 +142,7 @@ def _single_track_geometry(tr):
         dtype=np.int32,
     )
     track_id = np.full(n, getattr(tr, "idx", 0), dtype=np.int32)
-    dt = getattr(tr, "dt", 0.0)
-    t0 = getattr(tr, "time", 0.0)
-    time_arr = (t0 + np.arange(n) * dt).astype(np.float64)
+    time_arr = _track_time_array(tr)
     if hasattr(tr, "vmag") and tr.vmag is not None:
         if len(tr.vmag) == n:
             v_at_pts = np.asarray(tr.vmag, dtype=np.float64)  # B-spline: one value per point
@@ -119,15 +156,9 @@ def _single_track_geometry(tr):
             v_at_pts = np.full(n, np.nan, dtype=np.float64)
     else:
         v_at_pts = np.full(n, np.nan, dtype=np.float64)
-    diameter_pts = np.asarray(getattr(tr, "diameter", np.full(n, np.nan))).astype(np.float64)
-    if len(diameter_pts) != n:
-        diameter_pts = np.full(n, np.nan, dtype=np.float64)
-    intensity_pts = np.asarray(getattr(tr, "intensity", np.full(n, np.nan))).astype(np.float64)
-    if len(intensity_pts) != n:
-        intensity_pts = np.full(n, np.nan, dtype=np.float64)
-    mass_pts = np.asarray(getattr(tr, "mass", np.full(n, np.nan))).astype(np.float64)
-    if len(mass_pts) != n:
-        mass_pts = np.full(n, np.nan, dtype=np.float64)
+    diameter_pts = _track_attr_scalar_per_point(tr, "diameter", n)
+    intensity_pts = _track_attr_scalar_per_point(tr, "intensity", n)
+    mass_pts = _track_attr_scalar_per_point(tr, "mass", n)
     return points, conn, track_id, time_arr, v_at_pts, diameter_pts, intensity_pts, mass_pts
 
 
@@ -157,9 +188,7 @@ def _tracks_to_geometry(tracks):
         pt_offset += n
         # Point attributes
         track_id_list.append(np.full(n, getattr(tr, 'idx', 0)))
-        dt = getattr(tr, 'dt', 0.0)
-        t0 = getattr(tr, 'time', 0.0)
-        time_list.append(t0 + np.arange(n) * dt)
+        time_list.append(_track_time_array(tr))
         # Velocity magnitude at points (vmag length n = B-spline, n-1 = finite diff)
         if hasattr(tr, 'vmag') and tr.vmag is not None:
             if len(tr.vmag) == n:
@@ -175,12 +204,9 @@ def _tracks_to_geometry(tracks):
                 vmag_at_points_list.append(np.full(n, np.nan))
         else:
             vmag_at_points_list.append(np.full(n, np.nan))
-        d = getattr(tr, 'diameter', None)
-        diameter_list.append(np.asarray(d).astype(np.float64) if d is not None and len(d) == n else np.full(n, np.nan))
-        i = getattr(tr, 'intensity', None)
-        intensity_list.append(np.asarray(i).astype(np.float64) if i is not None and len(i) == n else np.full(n, np.nan))
-        m = getattr(tr, 'mass', None)
-        mass_list.append(np.asarray(m).astype(np.float64) if m is not None and len(m) == n else np.full(n, np.nan))
+        diameter_list.append(_track_attr_scalar_per_point(tr, 'diameter', n))
+        intensity_list.append(_track_attr_scalar_per_point(tr, 'intensity', n))
+        mass_list.append(_track_attr_scalar_per_point(tr, 'mass', n))
 
     if not points_list:
         return None, None, None, None, None, None, None, None
@@ -208,7 +234,7 @@ def _write_paraview_per_snapshot(
     Use the time slider to view each 4-frame track individually.
     """
     valid = [
-        (i, _single_track_geometry(tr))
+        (i, tr, _single_track_geometry(tr))
         for i, tr in enumerate(tracks)
         if len(tr.X) >= 2
     ]
@@ -217,7 +243,15 @@ def _write_paraview_per_snapshot(
             "No valid tracks (each track must have at least 2 points)")
 
     n_snapshots = len(valid)
-    n_pts_max = max(geom[0].shape[0] for _, geom in valid)
+    n_pts_max = max(geom[0].shape[0] for _, _, geom in valid)
+    max_intensity_components = max(
+        _track_attr_components_per_point(tr, "intensity", len(tr.X)).shape[1]
+        for _, tr, _ in valid
+    )
+    max_mass_components = max(
+        _track_attr_components_per_point(tr, "mass", len(tr.X)).shape[1]
+        for _, tr, _ in valid
+    )
 
     # Pad all to same number of points (4 for 4-frame tracks)
     points_all = np.full((n_snapshots, n_pts_max, 3), np.nan, dtype=np.float64)
@@ -227,9 +261,17 @@ def _write_paraview_per_snapshot(
     diameter_all = np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
     intensity_all = np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
     mass_all = np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
+    intensity_components_all = [
+        np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
+        for _ in range(max_intensity_components)
+    ]
+    mass_components_all = [
+        np.full((n_snapshots, n_pts_max), np.nan, dtype=np.float64)
+        for _ in range(max_mass_components)
+    ]
     time_values = []
 
-    for snap_idx, (tr_idx, geom) in enumerate(valid):
+    for snap_idx, (tr_idx, tr, geom) in enumerate(valid):
         points, conn, track_id, time_arr, v_at_pts, d_pts, i_pts, m_pts = geom
         n = points.shape[0]
         points_all[snap_idx, :n, :] = points
@@ -240,6 +282,14 @@ def _write_paraview_per_snapshot(
         diameter_all[snap_idx, :n] = d_pts
         intensity_all[snap_idx, :n] = i_pts
         mass_all[snap_idx, :n] = m_pts
+        i_comp = _track_attr_components_per_point(tr, "intensity", n)
+        for c in range(max_intensity_components):
+            if c < i_comp.shape[1]:
+                intensity_components_all[c][snap_idx, :n] = i_comp[:, c]
+        m_comp = _track_attr_components_per_point(tr, "mass", n)
+        for c in range(max_mass_components):
+            if c < m_comp.shape[1]:
+                mass_components_all[c][snap_idx, :n] = m_comp[:, c]
         time_values.append(float(time_arr[0]))
 
     # Static connectivity: one polyline, n_pts_max nodes (same for every timestep)
@@ -257,6 +307,14 @@ def _write_paraview_per_snapshot(
         f.create_dataset("Diameter", data=diameter_all)
         f.create_dataset("Intensity", data=intensity_all)
         f.create_dataset("Mass", data=mass_all)
+        for c in range(max_intensity_components):
+            f.create_dataset(
+                f"Intensity_{c}", data=intensity_components_all[c]
+            )
+        for c in range(max_mass_components):
+            f.create_dataset(
+                f"Mass_{c}", data=mass_components_all[c]
+            )
         if include_velocity_magnitude:
             f.create_dataset("VelocityMagnitude", data=vmag_all)
 
@@ -293,6 +351,18 @@ def _write_paraview_per_snapshot(
         '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d %d">%s:/Mass</DataItem>' % (n_snapshots, n_pts_max, h5_ref),
         '      </Attribute>',
     ]
+    for c in range(max_intensity_components):
+        xdmf_lines.extend([
+            '      <Attribute Name="Intensity_%d" Type="Scalar" Center="Node">' % c,
+            '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d %d">%s:/Intensity_%d</DataItem>' % (n_snapshots, n_pts_max, h5_ref, c),
+            '      </Attribute>',
+        ])
+    for c in range(max_mass_components):
+        xdmf_lines.extend([
+            '      <Attribute Name="Mass_%d" Type="Scalar" Center="Node">' % c,
+            '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d %d">%s:/Mass_%d</DataItem>' % (n_snapshots, n_pts_max, h5_ref, c),
+            '      </Attribute>',
+        ])
     if include_velocity_magnitude:
         xdmf_lines.extend([
             '      <Attribute Name="VelocityMagnitude" Type="Scalar" Center="Node">',
@@ -355,7 +425,40 @@ def write_tracks_paraview(
 
     points, connectivity, track_id, time_arr, vmag_at_points, diameter_pts, intensity_pts, mass_pts = geom
     n_points = points.shape[0]
-    n_cells = len([t for t in tracks if len(t.X) >= 2])
+    valid_tracks = [t for t in tracks if len(t.X) >= 2]
+    n_cells = len(valid_tracks)
+    max_intensity_components = max(
+        (_track_attr_components_per_point(t, "intensity", len(t.X)).shape[1]
+         for t in valid_tracks),
+        default=0,
+    )
+    max_mass_components = max(
+        (_track_attr_components_per_point(t, "mass", len(t.X)).shape[1]
+         for t in valid_tracks),
+        default=0,
+    )
+    intensity_component_pts = []
+    for c in range(max_intensity_components):
+        parts = []
+        for tr in valid_tracks:
+            n = len(tr.X)
+            arr = _track_attr_components_per_point(tr, "intensity", n)
+            if c < arr.shape[1]:
+                parts.append(arr[:, c])
+            else:
+                parts.append(np.full(n, np.nan, dtype=np.float64))
+        intensity_component_pts.append(np.concatenate(parts).astype(np.float64))
+    mass_component_pts = []
+    for c in range(max_mass_components):
+        parts = []
+        for tr in valid_tracks:
+            n = len(tr.X)
+            arr = _track_attr_components_per_point(tr, "mass", n)
+            if c < arr.shape[1]:
+                parts.append(arr[:, c])
+            else:
+                parts.append(np.full(n, np.nan, dtype=np.float64))
+        mass_component_pts.append(np.concatenate(parts).astype(np.float64))
 
     with h5py.File(h5_path, "w") as f:
         f.create_dataset("Points", data=points)
@@ -365,6 +468,14 @@ def write_tracks_paraview(
         f.create_dataset("Diameter", data=diameter_pts)
         f.create_dataset("Intensity", data=intensity_pts)
         f.create_dataset("Mass", data=mass_pts)
+        for c in range(max_intensity_components):
+            f.create_dataset(
+                f"Intensity_{c}", data=intensity_component_pts[c]
+            )
+        for c in range(max_mass_components):
+            f.create_dataset(
+                f"Mass_{c}", data=mass_component_pts[c]
+            )
         if include_velocity_magnitude and np.any(np.isfinite(vmag_at_points)):
             f.create_dataset("VelocityMagnitude", data=vmag_at_points)
 
@@ -412,6 +523,22 @@ def write_tracks_paraview(
         '        </DataItem>',
         '      </Attribute>',
     ]
+    for c in range(max_intensity_components):
+        xdmf_lines.extend([
+            '      <Attribute Name="Intensity_%d" Type="Scalar" Center="Node">' % c,
+            '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d">' % n_points,
+            '          %s:/Intensity_%d' % (h5_ref, c),
+            '        </DataItem>',
+            '      </Attribute>',
+        ])
+    for c in range(max_mass_components):
+        xdmf_lines.extend([
+            '      <Attribute Name="Mass_%d" Type="Scalar" Center="Node">' % c,
+            '        <DataItem Format="HDF" NumberType="Float" Precision="8" Dimensions="%d">' % n_points,
+            '          %s:/Mass_%d' % (h5_ref, c),
+            '        </DataItem>',
+            '      </Attribute>',
+        ])
     if include_velocity_magnitude and np.any(np.isfinite(vmag_at_points)):
         xdmf_lines.extend([
             '      <Attribute Name="VelocityMagnitude" Type="Scalar" Center="Node">',

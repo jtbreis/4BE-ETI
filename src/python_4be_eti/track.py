@@ -78,7 +78,7 @@ def sample_bspline_curve(t, X, Y, Z, num_samples=50):
 
 
 class Track():
-    def __init__(self, X, Y, Z, dt, idx, time, run):
+    def __init__(self, X, Y, Z, dt, idx, time, run, physical_times=None):
         self.time = time
         self.dt = dt
         self.X = X
@@ -87,6 +87,10 @@ class Track():
         self.idx = idx
         self.track_length = X.shape[0]
         self.run = run
+        self.physical_times = (
+            None if physical_times is None
+            else np.asarray(physical_times, dtype=np.float64)
+        )
         self.v = None
         self.a = None
 
@@ -95,9 +99,15 @@ class Track():
         if use_bspline and self.track_length >= 4 and make_interp_spline is not None:
             self._compute_velocity_acceleration_bspline()
             return
-        self.vx = np.diff(self.X) / self.dt
-        self.vy = np.diff(self.Y) / self.dt
-        self.vz = np.diff(self.Z) / self.dt
+        if self.physical_times is not None and len(self.physical_times) == self.track_length:
+            dt_seg = np.diff(self.physical_times)
+            self.vx = np.diff(self.X) / dt_seg
+            self.vy = np.diff(self.Y) / dt_seg
+            self.vz = np.diff(self.Z) / dt_seg
+        else:
+            self.vx = np.diff(self.X) / self.dt
+            self.vy = np.diff(self.Y) / self.dt
+            self.vz = np.diff(self.Z) / self.dt
         self.v = np.stack([self.vx, self.vy, self.vz], axis=-1)
         self.vmag = np.linalg.norm(self.v, axis=1)
 
@@ -110,15 +120,25 @@ class Track():
         if self.v is None:
             print('Calculate Velocity first!')
             return
-        self.ax = np.diff(self.vx) / self.dt
-        self.ay = np.diff(self.vy) / self.dt
-        self.az = np.diff(self.vz) / self.dt
+        if self.physical_times is not None and len(self.physical_times) == self.track_length:
+            dt_seg = np.diff(self.physical_times)
+            dt_mid = 0.5 * (dt_seg[1:] + dt_seg[:-1])
+            self.ax = np.diff(self.vx) / dt_mid
+            self.ay = np.diff(self.vy) / dt_mid
+            self.az = np.diff(self.vz) / dt_mid
+        else:
+            self.ax = np.diff(self.vx) / self.dt
+            self.ay = np.diff(self.vy) / self.dt
+            self.az = np.diff(self.vz) / self.dt
         self.a = np.stack([self.ax, self.ay, self.az], axis=-1)
         self.amag = np.linalg.norm(self.a, axis=1)
 
     def _compute_velocity_acceleration_bspline(self):
         """Set velocity and acceleration at each particle position from a cubic B-spline fit. Requires at least 4 points."""
-        t = self.time + np.arange(self.track_length) * self.dt
+        if self.physical_times is not None and len(self.physical_times) == self.track_length:
+            t = self.physical_times
+        else:
+            t = self.time + np.arange(self.track_length) * self.dt
         vx, vy, vz, ax, ay, az = velocity_acceleration_from_bspline(
             t, np.asarray(self.X), np.asarray(self.Y), np.asarray(self.Z)
         )

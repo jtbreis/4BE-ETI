@@ -10,7 +10,12 @@ except ImportError:
     tqdm = None
 
 from .utils.basic_utils import load_data_h5, write_data_h5
-from .particle_tracking_code import no_previous_tracks_3d, no_previous_tracks, previous_tracks, previous_tracks_3d
+from .particle_tracking_code import (
+    no_previous_tracks,
+    previous_tracks,
+    set_mesh_debug_match_prints,
+)
+from .particle_tracking_numba import no_previous_tracks_3d, previous_tracks_3d
 
 
 def process_frame_range(frame_range, folder, filename, dimension,
@@ -21,7 +26,15 @@ def process_frame_range(frame_range, folder, filename, dimension,
                         start_time, show_progress=True,
                         output_h5part=None, dt=1.0, write_failed_tracks=False,
                         use_bspline=False, export_bspline_paraview=False,
-                        rep_rate=None, run=0):
+                        rep_rate=None, run=0,
+                        track_length=4,
+                        position_scale_to_m=1e-3,
+                        position_units_str="mm",
+                        particle_progress_interval=1000,
+                        max_candidates_mesh=None,
+                        max_targets_mesh=None,
+                        debug_mesh_match_prints=0):
+    set_mesh_debug_match_prints(debug_mesh_match_prints)
     print(
         "  Loading frames {}-{} from HDF5...".format(frame_range[0], frame_range[-1]), flush=True)
     data_range = load_data_h5(
@@ -58,8 +71,11 @@ def process_frame_range(frame_range, folder, filename, dimension,
 
         n_particles = len(imInit)
         for ii in range(n_particles):
-            # Heartbeat every 1000 particles so you can see progress (avoids "stuck" impression)
-            if (ii + 1) % 1000 == 0 or ii == 0:
+            # Heartbeat: print every ``particle_progress_interval`` particles (and first); 0 = off
+            if particle_progress_interval and (
+                (ii + 1) % particle_progress_interval == 0
+                or ii == 0
+            ):
                 print("  frame {}: particle {}/{}".format(jj,
                       ii + 1, n_particles), flush=True)
             if data_range.Count[imInit[ii]] == 0:
@@ -69,6 +85,9 @@ def process_frame_range(frame_range, folder, filename, dimension,
                         box_size_initial_x_lo, box_size_initial_x_hi,
                         box_size_initial_y_lo, box_size_initial_y_hi,
                         box_size_initial_z_lo, box_size_initial_z_hi,
+                        max_candidates_mesh=max_candidates_mesh,
+                        max_targets_mesh=max_targets_mesh,
+                        debug_mesh_match_prints=debug_mesh_match_prints,
                         _im0=idx_0, _im1=idx_1, _im2=idx_2, _im3=idx_3,
                     )
                 else:
@@ -81,6 +100,8 @@ def process_frame_range(frame_range, folder, filename, dimension,
                 if dimension == '3d':
                     data_range = previous_tracks_3d(
                         data_range, jj, ii, box_size,
+                        max_candidates_mesh=max_candidates_mesh,
+                        max_targets_mesh=max_targets_mesh,
                         _im0=idx_m1, _im1=idx_0, _im2=idx_1, _im3=idx_2,
                     )
                 else:
@@ -89,8 +110,14 @@ def process_frame_range(frame_range, folder, filename, dimension,
         if len(data_range.Count[data_range.Count == -1]) > 0:
             data_range.Count[data_range.Count == -1] = 0
 
-    write_data_h5(data_range, folder, frame_range, output_h5part=output_h5part,
-                  dt=dt, include_failed_tracks=write_failed_tracks, use_bspline=use_bspline)
+    write_data_h5(
+        data_range, folder, frame_range, output_h5part=output_h5part,
+        dt=dt, include_failed_tracks=write_failed_tracks, use_bspline=use_bspline,
+        rep_rate_hz=rep_rate,
+        track_length=track_length,
+        position_scale_to_m=position_scale_to_m,
+        position_units_str=position_units_str,
+    )
     # Export B-spline curves after each frame range so partial results are saved if process is killed
     if export_bspline_paraview and use_bspline and dt is not None and rep_rate is not None:
         try:
@@ -118,7 +145,14 @@ def process_batch(batch, folder, filename, dimension,
                   start_time, show_progress=True,
                   output_h5part=None, dt=1.0, write_failed_tracks=False,
                   use_bspline=False, export_bspline_paraview=False,
-                  rep_rate=None, run=0):
+                  rep_rate=None, run=0,
+                  track_length=4,
+                  position_scale_to_m=1e-3,
+                  position_units_str="mm",
+                  particle_progress_interval=1000,
+                  max_candidates_mesh=None,
+                  max_targets_mesh=None,
+                  debug_mesh_match_prints=0):
     print("[Worker] Processing batch ({} frame ranges)...".format(
         len(batch)), flush=True)
     results = []
@@ -138,6 +172,13 @@ def process_batch(batch, folder, filename, dimension,
             export_bspline_paraview=export_bspline_paraview,
             rep_rate=rep_rate,
             run=run,
+            track_length=track_length,
+            position_scale_to_m=position_scale_to_m,
+            position_units_str=position_units_str,
+            particle_progress_interval=particle_progress_interval,
+            max_candidates_mesh=max_candidates_mesh,
+            max_targets_mesh=max_targets_mesh,
+            debug_mesh_match_prints=debug_mesh_match_prints,
         )
         print(progress)
     return results

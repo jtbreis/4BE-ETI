@@ -12,10 +12,34 @@ MAX_CANDIDATES_MESH = 1000
 # Max target particles in meshgrid (restrict to spatial neighborhood to speed up)
 MAX_TARGETS_MESH = 2000
 
+# Remaining lines to print for ``debug_mesh_match_prints`` (reset per frame-range worker).
+_mesh_debug_match_remaining = 0
 
-def _filter_targets_by_box(im, x_pred, y_pred, z_pred, data, box_size):
+
+def set_mesh_debug_match_prints(n):
+    """Reset counter for :func:`no_previous_tracks_3d` mesh-size diagnostics (per worker / frame range)."""
+    global _mesh_debug_match_remaining
+    _mesh_debug_match_remaining = max(0, int(n))
+
+
+def _maybe_print_mesh_match_no_prev(im, ii, n_im1, n_ind1, n_im2sub, n_ind2, n_im3sub, n_ind3):
+    global _mesh_debug_match_remaining
+    if _mesh_debug_match_remaining <= 0:
+        return
+    print(
+        "[4BE-ETI mesh-debug] no_previous_tracks_3d "
+        "frame={} seed_particle={} "
+        "|N(frame+1)={} len(ind1)={} len(im2_sub)={} len(ind2)={} len(im3_sub)={} len(ind3)={}".format(
+            im, ii, n_im1, n_ind1, n_im2sub, n_ind2, n_im3sub, n_ind3,
+        ),
+        flush=True,
+    )
+    _mesh_debug_match_remaining -= 1
+
+
+def _filter_targets_by_box(im, x_pred, y_pred, z_pred, data, box_size, max_targets_mesh):
     """Restrict im to particles inside the AABB of predictions + box_size. Returns subset of im."""
-    if len(im) <= MAX_TARGETS_MESH:
+    if len(im) <= max_targets_mesh:
         return im
     x, y, z = data.x[im], data.y[im], data.z[im]
     xlo, xhi = x_pred.min() - box_size, x_pred.max() + box_size
@@ -24,7 +48,7 @@ def _filter_targets_by_box(im, x_pred, y_pred, z_pred, data, box_size):
     mask = (x >= xlo) & (x <= xhi) & (y >= ylo) & (
         y <= yhi) & (z >= zlo) & (z <= zhi)
     im_sub = im[mask]
-    return im_sub if len(im_sub) <= MAX_TARGETS_MESH else im_sub[:MAX_TARGETS_MESH]
+    return im_sub if len(im_sub) <= max_targets_mesh else im_sub[:max_targets_mesh]
 
 
 def finding_indices(x_ind, xPred_ind, y_ind, yPred_ind):
@@ -60,6 +84,17 @@ def finding_indices(x_ind, xPred_ind, y_ind, yPred_ind):
     ind_pred = a[:, 1]
 
     return ind, ind_pred
+
+
+def predict_third_frame_position(p0, p1, p2):
+    """
+    Position at frame n+3 from p0,p1,p2 at n,n+1,n+2 (uniform Δt).
+
+    Unique quadratic through the three samples; equals the 4BE Taylor step
+    x^{n+3} = x^{n+1} + 2Δt v + (1/2)a(2Δt)^2 with Δt=1, v=p2-p1,
+    a = p2 - 2*p1 + p0.
+    """
+    return 3.0 * p2 - 3.0 * p1 + p0
 
 
 def previous_tracks(data, im, ii, box_size):
@@ -98,8 +133,10 @@ def previous_tracks(data, im, ii, box_size):
             data.Count[im2[temp_loc]] = data.CountTemp[im2[temp_loc]]
         return data
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * data.x[im1[ii]] + 0.5 * x0
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * data.y[im1[ii]] + 0.5 * y0
+    xPred3 = predict_third_frame_position(
+        x0, data.x[im1[ii]], data.x[im2[ind2]])
+    yPred3 = predict_third_frame_position(
+        y0, data.y[im1[ii]], data.y[im2[ind2]])
 
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3])
@@ -193,10 +230,16 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x_lo, box_size_i
     if len(ind2) == 0:
         return data
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * \
-        data.x[im1[ind1[ind2_pred]]] + 0.5 * data.x[im0[ii]]
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * \
-        data.y[im1[ind1[ind2_pred]]] + 0.5 * data.y[im0[ii]]
+    xPred3 = predict_third_frame_position(
+        data.x[im0[ii]],
+        data.x[im1[ind1[ind2_pred]]],
+        data.x[im2[ind2]],
+    )
+    yPred3 = predict_third_frame_position(
+        data.y[im0[ii]],
+        data.y[im1[ind1[ind2_pred]]],
+        data.y[im2[ind2]],
+    )
 
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3])
@@ -240,7 +283,18 @@ def no_previous_tracks(data, im, ii, box_size, box_size_initial_x_lo, box_size_i
     return data
 
 
-def previous_tracks_3d(data, im, ii, box_size, _im0=None, _im1=None, _im2=None, _im3=None):
+def previous_tracks_3d(
+    data,
+    im,
+    ii,
+    box_size,
+    max_candidates_mesh=None,
+    max_targets_mesh=None,
+    _im0=None,
+    _im1=None,
+    _im2=None,
+    _im3=None,
+):
     """
     Runs the particle tracking code for a path that has already been started
     Inputs: data - the data array containing information about particles
@@ -248,11 +302,17 @@ def previous_tracks_3d(data, im, ii, box_size, _im0=None, _im1=None, _im2=None, 
             im - the current image number
             ii - the current particle in the image (im)
             box_size - size of the search box to use
+            max_candidates_mesh / max_targets_mesh - optional caps for 3D meshgrid
+                stages (defaults: module constants MAX_CANDIDATES_MESH, MAX_TARGETS_MESH).
             _im0,_im1,_im2,_im3 - optional precomputed frame indices (avoids repeated np.where)
     Outputs: data - the data array containing information about particles and
                     previous tracking results, now updated for the current
                     particle
     """
+    _mc = MAX_CANDIDATES_MESH if max_candidates_mesh is None else int(max_candidates_mesh)
+    _mt = MAX_TARGETS_MESH if max_targets_mesh is None else int(max_targets_mesh)
+    if _mc < 1 or _mt < 1:
+        raise ValueError("max_candidates_mesh and max_targets_mesh must be >= 1")
     if _im0 is not None and _im1 is not None and _im2 is not None and _im3 is not None:
         im0, im1, im2, im3 = _im0, _im1, _im2, _im3
     else:
@@ -284,15 +344,18 @@ def previous_tracks_3d(data, im, ii, box_size, _im0=None, _im1=None, _im2=None, 
         if len(temp_loc) == 1:
             data.Count[im2[temp_loc]] = data.CountTemp[im2[temp_loc]]
             return data
-    if len(ind2) > MAX_CANDIDATES_MESH:
-        ind2 = ind2[:MAX_CANDIDATES_MESH]
+    if len(ind2) > _mc:
+        ind2 = ind2[:_mc]
 
-    xPred3 = 2.5 * data.x[im2[ind2]] - 2 * data.x[im1[ii]] + 0.5 * x0
-    yPred3 = 2.5 * data.y[im2[ind2]] - 2 * data.y[im1[ii]] + 0.5 * y0
-    zPred3 = 2.5 * data.z[im2[ind2]] - 2 * data.z[im1[ii]] + 0.5 * z0
+    xPred3 = predict_third_frame_position(
+        x0, data.x[im1[ii]], data.x[im2[ind2]])
+    yPred3 = predict_third_frame_position(
+        y0, data.y[im1[ii]], data.y[im2[ind2]])
+    zPred3 = predict_third_frame_position(
+        z0, data.z[im1[ii]], data.z[im2[ind2]])
 
     im3_sub = _filter_targets_by_box(
-        im3, xPred3, yPred3, zPred3, data, box_size)
+        im3, xPred3, yPred3, zPred3, data, box_size, _mt)
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3_sub])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3_sub])
     zPred3_gr, z3_gr = np.meshgrid(zPred3, data.z[im3_sub])
@@ -343,11 +406,25 @@ def previous_tracks_3d(data, im, ii, box_size, _im0=None, _im1=None, _im2=None, 
     return data
 
 
-def no_previous_tracks_3d(data, im, ii, box_size,
-                          box_size_initial_x_lo, box_size_initial_x_hi,
-                          box_size_initial_y_lo, box_size_initial_y_hi,
-                          box_size_initial_z_lo, box_size_initial_z_hi,
-                          _im0=None, _im1=None, _im2=None, _im3=None):
+def no_previous_tracks_3d(
+    data,
+    im,
+    ii,
+    box_size,
+    box_size_initial_x_lo,
+    box_size_initial_x_hi,
+    box_size_initial_y_lo,
+    box_size_initial_y_hi,
+    box_size_initial_z_lo,
+    box_size_initial_z_hi,
+    max_candidates_mesh=None,
+    max_targets_mesh=None,
+    debug_mesh_match_prints=0,
+    _im0=None,
+    _im1=None,
+    _im2=None,
+    _im3=None,
+):
     """
     Runs the particle tracking code for a path that has not already been started
     Inputs: data - the data array containing information about particles
@@ -357,11 +434,20 @@ def no_previous_tracks_3d(data, im, ii, box_size,
             box_size - size of the search box to use
             box_size_initial_*_lo/hi - signed initial search offsets per axis
                 (e.g. x: [x0+lo, x0+hi], allows +0.5..+1.5 or -0.2..+3.0)
+            max_candidates_mesh / max_targets_mesh - optional caps for 3D meshgrid
+                stages (defaults: module constants MAX_CANDIDATES_MESH, MAX_TARGETS_MESH).
+            debug_mesh_match_prints - if > 0, print mesh-stage array sizes for the first
+                N calls with at least one frame+1 candidate (len(ind1) > 0); uses NumPy path
+                when Numba is enabled (see particle_tracking_numba).
             _im0,_im1,_im2,_im3 - optional precomputed frame indices (avoids repeated np.where)
     Outputs: data - the data array containing information about particles and
                     previous tracking results, now updated for the current
                     particle
     """
+    _mc = MAX_CANDIDATES_MESH if max_candidates_mesh is None else int(max_candidates_mesh)
+    _mt = MAX_TARGETS_MESH if max_targets_mesh is None else int(max_targets_mesh)
+    if _mc < 1 or _mt < 1:
+        raise ValueError("max_candidates_mesh and max_targets_mesh must be >= 1")
     if _im0 is not None and _im1 is not None and _im2 is not None and _im3 is not None:
         im0, im1, im2, im3 = _im0, _im1, _im2, _im3
     else:
@@ -389,15 +475,15 @@ def no_previous_tracks_3d(data, im, ii, box_size,
 
     if len(ind1) == 0:
         return data
-    if len(ind1) > MAX_CANDIDATES_MESH:
-        ind1 = ind1[:MAX_CANDIDATES_MESH]
+    if len(ind1) > _mc:
+        ind1 = ind1[:_mc]
 
     xPred2 = 2 * data.x[im1[ind1]] - data.x[im0[ii]]
     yPred2 = 2 * data.y[im1[ind1]] - data.y[im0[ii]]
     zPred2 = 2 * data.z[im1[ind1]] - data.z[im0[ii]]
 
     im2_sub = _filter_targets_by_box(
-        im2, xPred2, yPred2, zPred2, data, box_size)
+        im2, xPred2, yPred2, zPred2, data, box_size, _mt)
     xPred2_gr, x2_gr = np.meshgrid(xPred2, data.x[im2_sub])
     yPred2_gr, y2_gr = np.meshgrid(yPred2, data.y[im2_sub])
     zPred2_gr, z2_gr = np.meshgrid(zPred2, data.z[im2_sub])
@@ -413,20 +499,33 @@ def no_previous_tracks_3d(data, im, ii, box_size,
     ind2, ind2_pred = finding_indices(ind2_, ind2_pred_, z2_ind, zPred2_ind)
 
     if len(ind2) == 0:
+        if _mesh_debug_match_remaining > 0:
+            _maybe_print_mesh_match_no_prev(
+                im, ii, len(im1), len(ind1), len(im2_sub), 0, 0, 0,
+            )
         return data
-    if len(ind2) > MAX_CANDIDATES_MESH:
-        ind2 = ind2[:MAX_CANDIDATES_MESH]
-        ind2_pred = ind2_pred[:MAX_CANDIDATES_MESH]
+    if len(ind2) > _mc:
+        ind2 = ind2[:_mc]
+        ind2_pred = ind2_pred[:_mc]
 
-    xPred3 = 2.5 * data.x[im2_sub[ind2]] - 2 * \
-        data.x[im1[ind1[ind2_pred]]] + 0.5 * data.x[im0[ii]]
-    yPred3 = 2.5 * data.y[im2_sub[ind2]] - 2 * \
-        data.y[im1[ind1[ind2_pred]]] + 0.5 * data.y[im0[ii]]
-    zPred3 = 2.5 * data.z[im2_sub[ind2]] - 2 * \
-        data.z[im1[ind1[ind2_pred]]] + 0.5 * data.z[im0[ii]]
+    xPred3 = predict_third_frame_position(
+        data.x[im0[ii]],
+        data.x[im1[ind1[ind2_pred]]],
+        data.x[im2_sub[ind2]],
+    )
+    yPred3 = predict_third_frame_position(
+        data.y[im0[ii]],
+        data.y[im1[ind1[ind2_pred]]],
+        data.y[im2_sub[ind2]],
+    )
+    zPred3 = predict_third_frame_position(
+        data.z[im0[ii]],
+        data.z[im1[ind1[ind2_pred]]],
+        data.z[im2_sub[ind2]],
+    )
 
     im3_sub = _filter_targets_by_box(
-        im3, xPred3, yPred3, zPred3, data, box_size)
+        im3, xPred3, yPred3, zPred3, data, box_size, _mt)
     xPred3_gr, x3_gr = np.meshgrid(xPred3, data.x[im3_sub])
     yPred3_gr, y3_gr = np.meshgrid(yPred3, data.y[im3_sub])
     zPred3_gr, z3_gr = np.meshgrid(zPred3, data.z[im3_sub])
@@ -440,6 +539,11 @@ def no_previous_tracks_3d(data, im, ii, box_size,
 
     ind3_, ind3_pred_ = finding_indices(x3_ind, xPred3_ind, y3_ind, yPred3_ind)
     ind3, ind3_pred = finding_indices(ind3_, ind3_pred_, z3_ind, zPred3_ind)
+
+    if _mesh_debug_match_remaining > 0:
+        _maybe_print_mesh_match_no_prev(
+            im, ii, len(im1), len(ind1), len(im2_sub), len(ind2), len(im3_sub), len(ind3),
+        )
 
     if len(ind3) == 0:
         return data

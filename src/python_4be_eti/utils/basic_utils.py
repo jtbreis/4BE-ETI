@@ -10,6 +10,63 @@ import h5py
 # This file introduces functions that are needed
 
 
+def position_unit_to_meters_per_unit(unit):
+    """Meters per one unit of position (e.g. mm -> 1e-3). Used to convert v/a to SI."""
+    if unit is None:
+        return 1.0
+    u = str(unit).strip().lower()
+    mapping = {
+        "m": 1.0,
+        "mm": 1e-3,
+        "um": 1e-6,
+        "μm": 1e-6,
+        "micron": 1e-6,
+        "micrometer": 1e-6,
+        "nm": 1e-9,
+    }
+    if u not in mapping:
+        raise ValueError(
+            "Unknown position unit %r; use one of: %s"
+            % (unit, sorted(set(mapping)))
+        )
+    return mapping[u]
+
+
+def physical_time_seconds(frame, dt, rep_rate_hz=None, track_length=4):
+    """
+    Physical time in seconds for global stereo frame index ``frame``.
+
+    If ``rep_rate_hz`` is set and positive, each 4-frame block (length ``track_length``)
+    is assumed to start every 1/rep_rate seconds, with subframes spaced by ``dt``:
+
+        t = (frame // L) / rep_rate + (frame % L) * dt
+
+    Otherwise ``t = frame * dt`` (uniform frame clock).
+    """
+    dt = float(dt)
+    frame = int(frame)
+    L = int(track_length)
+    if L <= 0:
+        L = 4
+    if rep_rate_hz is None or rep_rate_hz <= 0:
+        return float(frame) * dt
+    return float(frame // L) / float(rep_rate_hz) + float(frame % L) * dt
+
+
+def _acceleration_three_point(x0, x1, x2, t0, t1, t2):
+    """Approximate d^2 x / dt^2 at t1 for non-uniform times t0 < t1 < t2."""
+    dt01 = t1 - t0
+    dt12 = t2 - t1
+    if dt01 <= 0 or dt12 <= 0:
+        return np.nan
+    v01 = (x1 - x0) / dt01
+    v12 = (x2 - x1) / dt12
+    t02 = t2 - t0
+    if t02 <= 0:
+        return np.nan
+    return 2.0 * (v12 - v01) / t02
+
+
 def initialize_logfile(main_dir, filename):
     """
     Rounds a number up to the nearest multiple of the value defined by increment
@@ -144,17 +201,17 @@ def load_data_h5(filename, frame_range):
             slices[idx] = np.ones([n_pts, 1], dtype=int) * frame_idx
 
             if 'diameter' in frame and 'intensity' in frame and 'mass' in frame:
-                # (n_pts,) or (n_pts, maxcams)
-                d = np.array(frame['diameter'])
-                i = np.array(frame['intensity'])
-                m = np.array(frame['mass'])
-                if d.ndim == 2:
-                    d = np.nanmean(d, axis=1)
-                    i = np.nanmean(i, axis=1)
-                    m = np.nanmean(m, axis=1)
-                diameter_list[idx] = d.reshape(-1, 1)
-                intensity_list[idx] = i.reshape(-1, 1)
-                mass_list[idx] = m.reshape(-1, 1)
+                # (n_pts,) or (n_pts, maxcams) per-ray values from stereomatching
+                d = np.asarray(frame['diameter'], dtype=np.float64)
+                i = np.asarray(frame['intensity'], dtype=np.float64)
+                m = np.asarray(frame['mass'], dtype=np.float64)
+                if d.ndim == 1:
+                    d = d.reshape(-1, 1)
+                    i = i.reshape(-1, 1)
+                    m = m.reshape(-1, 1)
+                diameter_list[idx] = d
+                intensity_list[idx] = i
+                mass_list[idx] = m
                 has_props = True
             else:
                 diameter_list[idx] = np.full(
@@ -172,9 +229,9 @@ def load_data_h5(filename, frame_range):
         data.Cost = -np.ones_like(data.x)
         data.Area = -np.ones_like(data.x)
         if has_props:
-            data.diameter = np.concatenate(np.vstack(diameter_list))
-            data.intensity = np.concatenate(np.vstack(intensity_list))
-            data.mass = np.concatenate(np.vstack(mass_list))
+            data.diameter = np.vstack([diameter_list[i] for i in range(nframes)])
+            data.intensity = np.vstack([intensity_list[i] for i in range(nframes)])
+            data.mass = np.vstack([mass_list[i] for i in range(nframes)])
 
     return data
 
@@ -246,10 +303,14 @@ def _build_tracks_from_data(data: a, frame_range, include_failed_tracks):
     return out
 
 
-def _bspline_velocity_acceleration_lookup(data: a, frame_range, dt, include_failed_tracks):
+def _bspline_velocity_acceleration_lookup(
+    data: a, frame_range, dt, include_failed_tracks,
+    rep_rate_hz=None, track_length=4,
+):
     """
     For each track with at least 4 points, compute velocity and acceleration at each frame
     using a cubic B-spline fit. Returns dict (track_id, frame) -> (vx, vy, vz, ax, ay, az).
+    Derivatives are w.r.t. physical time (see physical_time_seconds).
     """
     try:
         from ..track import velocity_acceleration_from_bspline
@@ -260,7 +321,14 @@ def _bspline_velocity_acceleration_lookup(data: a, frame_range, dt, include_fail
     for tid, frames_arr, x_arr, y_arr, z_arr in tracks:
         if len(frames_arr) < 4:
             continue
-        t = frames_arr.astype(np.float64) * dt
+        t = np.array(
+            [
+                physical_time_seconds(
+                    int(f), dt, rep_rate_hz, track_length)
+                for f in frames_arr
+            ],
+            dtype=np.float64,
+        )
         try:
             vx, vy, vz, ax, ay, az = velocity_acceleration_from_bspline(
                 t, x_arr, y_arr, z_arr)
@@ -288,7 +356,13 @@ def _write_bspline_curves_paraview(data: a, frame_range, dt, filepath, include_f
     for tid, frames_arr, x_arr, y_arr, z_arr in tracks:
         if len(frames_arr) != 4:
             continue
-        t = frames_arr.astype(np.float64) * dt
+        t = np.array(
+            [
+                physical_time_seconds(int(f), dt, None, 4)
+                for f in frames_arr
+            ],
+            dtype=np.float64,
+        )
         try:
             _, x_curve, y_curve, z_curve = sample_bspline_curve(
                 t, x_arr, y_arr, z_arr, num_samples=num_samples)
@@ -335,18 +409,41 @@ def _write_bspline_curves_paraview(data: a, frame_range, dt, filepath, include_f
                  filepath, n_lines)
 
 
-def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, include_failed_tracks=False,
-                  use_bspline=False):
+def write_data_h5(
+    data: a,
+    folder,
+    frame_range,
+    output_h5part=None,
+    dt=1.0,
+    include_failed_tracks=False,
+    use_bspline=False,
+    rep_rate_hz=None,
+    track_length=4,
+    position_scale_to_m=1e-3,
+    position_units_str="mm",
+):
     """Write track data to HDF5. If output_h5part is set (parallel mode), write to that file instead of folder/tracks.h5part.
-    Velocity (vx, vy, vz) and acceleration (ax, ay, az) are computed from position history and written when dt is provided.
-    If use_bspline is True, velocity and acceleration are computed from a cubic B-spline fit (tracks with at least 4 points).
-    If include_failed_tracks is True, particles with Count==0 (tracking failed) are also written; their id is 0 and a 'tracked' dataset (bool) is written per step.
-    Only particles whose track appears in all 4 frames of the block are given a tracked index (treated as tracked).
+
+    Physical time (seconds) for each step is stored as group attribute ``Time``:
+    ``(frame // track_length) / rep_rate_hz + (frame % track_length) * dt`` when
+    ``rep_rate_hz`` is set and positive; otherwise ``frame * dt``.
+
+    Positions (x, y, z) are written in the user's length unit (``position_units_str``).
+    Velocities and accelerations are converted to SI (m/s and m/s^2) using
+    ``position_scale_to_m`` (meters per unit of position, e.g. 1e-3 for mm).
+
+    If use_bspline is True, velocity and acceleration use a cubic B-spline (tracks with at least 4 points).
+    If include_failed_tracks is True, particles with Count==0 are also written with id 0 and optional 'tracked' flag.
     """
     filename = output_h5part if output_h5part else os.path.join(
         folder, 'tracks.h5part')
     frame_range_set = set(frame_range)
     dt = float(dt) if dt is not None else 1.0
+    rep_rate_hz = float(rep_rate_hz) if rep_rate_hz is not None else None
+    track_length = int(track_length) if track_length is not None else 4
+    if track_length <= 0:
+        track_length = 4
+    position_scale_to_m = float(position_scale_to_m)
 
     # Only treat a track as tracked (non-zero id counts) if it appears in a full 4 frames
     max_id = int(np.max(data.Count)) if data.Count.size else 0
@@ -362,39 +459,54 @@ def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, incl
     bspline_lookup = {}
     if use_bspline:
         bspline_lookup = _bspline_velocity_acceleration_lookup(
-            data, frame_range, dt, include_failed_tracks
+            data, frame_range, dt, include_failed_tracks,
+            rep_rate_hz=rep_rate_hz, track_length=track_length,
         )
-    # B-spline curves VTK is written from perform_tracking after merge so one file contains all 4-frame tracks
 
     with h5py.File(filename, 'a') as f:
+        f.attrs["dt_s"] = dt
+        if rep_rate_hz is not None and rep_rate_hz > 0:
+            f.attrs["rep_rate_hz"] = rep_rate_hz
+        f.attrs["track_length"] = track_length
+        f.attrs["position_units"] = str(position_units_str)
+        f.attrs["position_scale_to_m"] = position_scale_to_m
+        f.attrs["time_units"] = "s"
+        f.attrs["velocity_units"] = "m/s"
+        f.attrs["acceleration_units"] = "m/s^2"
+
         print(frame_range)
         for frame in frame_range:
             step_name = f"Step#{frame}"
             if step_name in f:
                 del f[step_name]
             grp = f.create_group(step_name)
-            # Physical time for ParaView (H5Part reader uses Time attribute per step)
-            grp.attrs["Time"] = float(frame * dt)
+            t_phys = physical_time_seconds(
+                frame, dt, rep_rate_hz, track_length)
+            grp.attrs["Time"] = float(t_phys)
+            grp.attrs["time_units"] = "s"
+            grp.attrs["position_units"] = str(position_units_str)
 
             if include_failed_tracks:
                 mask = (data.Slice == frame)
             else:
-                # Only include particles whose track appears in 4 frames
                 mask = (data.Slice == frame) & (data.Count != 0)
                 if max_id > 0:
                     mask = mask & id_has_4_frames[np.asarray(
                         data.Count, dtype=int)]
-            n = int(np.sum(mask))
-            ids_cur = data.Count[mask]
-            x_cur = data.x[mask]
-            y_cur = data.y[mask]
-            z_cur = data.z[mask]
+            row_mask = np.asarray(mask).ravel()
+            n = int(np.sum(row_mask))
+            ids_cur = np.asarray(data.Count).ravel()[row_mask]
+            x_cur = np.asarray(data.x).ravel()[row_mask]
+            y_cur = np.asarray(data.y).ravel()[row_mask]
+            z_cur = np.asarray(data.z).ravel()[row_mask]
 
-            grp.create_dataset('x', data=x_cur)
-            grp.create_dataset('y', data=y_cur)
-            grp.create_dataset('z', data=z_cur)
+            dsx = grp.create_dataset('x', data=x_cur)
+            dsy = grp.create_dataset('y', data=y_cur)
+            dsz = grp.create_dataset('z', data=z_cur)
+            dsx.attrs["units"] = str(position_units_str)
+            dsy.attrs["units"] = str(position_units_str)
+            dsz.attrs["units"] = str(position_units_str)
 
-            # Build prev-frame index once per frame (for finite-difference fallback)
             id_to_idx_prev = None
             x_prev_arr = y_prev_arr = z_prev_arr = None
             id_to_idx_prev_prev = None
@@ -416,7 +528,13 @@ def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, incl
                 y_prev_prev_arr = data.y[mask_prev_prev]
                 z_prev_prev_arr = data.z[mask_prev_prev]
 
-            # Velocity: from B-spline lookup if available, else finite difference
+            t_cur = physical_time_seconds(
+                frame, dt, rep_rate_hz, track_length)
+            t_m1 = physical_time_seconds(
+                frame - 1, dt, rep_rate_hz, track_length)
+            t_m2 = physical_time_seconds(
+                frame - 2, dt, rep_rate_hz, track_length)
+
             vx = np.full(n, np.nan, dtype=np.float64)
             vy = np.full(n, np.nan, dtype=np.float64)
             vz = np.full(n, np.nan, dtype=np.float64)
@@ -425,49 +543,81 @@ def write_data_h5(data: a, folder, frame_range, output_h5part=None, dt=1.0, incl
                 key = (tid, frame)
                 vals = bspline_lookup.get(key, None)
                 if vals is not None:
-                    vx[i], vy[i], vz[i] = vals[0], vals[1], vals[2]
+                    vx[i] = vals[0] * position_scale_to_m
+                    vy[i] = vals[1] * position_scale_to_m
+                    vz[i] = vals[2] * position_scale_to_m
                 elif id_to_idx_prev is not None and tid in id_to_idx_prev:
                     j = id_to_idx_prev[tid]
-                    vx[i] = (x_cur[i] - x_prev_arr[j]) / dt
-                    vy[i] = (y_cur[i] - y_prev_arr[j]) / dt
-                    vz[i] = (z_cur[i] - z_prev_arr[j]) / dt
-            grp.create_dataset('vx', data=vx)
-            grp.create_dataset('vy', data=vy)
-            grp.create_dataset('vz', data=vz)
+                    dt_step = t_cur - t_m1
+                    if dt_step > 0:
+                        vx[i] = (
+                            x_cur[i] - x_prev_arr[j]) / dt_step * position_scale_to_m
+                        vy[i] = (
+                            y_cur[i] - y_prev_arr[j]) / dt_step * position_scale_to_m
+                        vz[i] = (
+                            z_cur[i] - z_prev_arr[j]) / dt_step * position_scale_to_m
+            dvx = grp.create_dataset('vx', data=vx)
+            dvy = grp.create_dataset('vy', data=vy)
+            dvz = grp.create_dataset('vz', data=vz)
+            dvx.attrs["units"] = "m/s"
+            dvy.attrs["units"] = "m/s"
+            dvz.attrs["units"] = "m/s"
 
-            # Acceleration: from B-spline lookup if available, else finite difference
             ax = np.full(n, np.nan, dtype=np.float64)
             ay = np.full(n, np.nan, dtype=np.float64)
             az = np.full(n, np.nan, dtype=np.float64)
-            dt2 = dt * dt
             for i in range(n):
                 tid = int(ids_cur[i])
                 key = (tid, frame)
                 vals = bspline_lookup.get(key, None)
                 if vals is not None:
-                    ax[i], ay[i], az[i] = vals[3], vals[4], vals[5]
+                    ax[i] = vals[3] * position_scale_to_m
+                    ay[i] = vals[4] * position_scale_to_m
+                    az[i] = vals[5] * position_scale_to_m
                 elif id_to_idx_prev is not None and id_to_idx_prev_prev is not None and tid in id_to_idx_prev and tid in id_to_idx_prev_prev:
                     j = id_to_idx_prev[tid]
                     k = id_to_idx_prev_prev[tid]
-                    ax[i] = (x_cur[i] - 2 * x_prev_arr[j] +
-                             x_prev_prev_arr[k]) / dt2
-                    ay[i] = (y_cur[i] - 2 * y_prev_arr[j] +
-                             y_prev_prev_arr[k]) / dt2
-                    az[i] = (z_cur[i] - 2 * z_prev_arr[j] +
-                             z_prev_prev_arr[k]) / dt2
-            grp.create_dataset('ax', data=ax)
-            grp.create_dataset('ay', data=ay)
-            grp.create_dataset('az', data=az)
+                    ax[i] = _acceleration_three_point(
+                        x_prev_prev_arr[k], x_prev_arr[j], x_cur[i],
+                        t_m2, t_m1, t_cur) * position_scale_to_m
+                    ay[i] = _acceleration_three_point(
+                        y_prev_prev_arr[k], y_prev_arr[j], y_cur[i],
+                        t_m2, t_m1, t_cur) * position_scale_to_m
+                    az[i] = _acceleration_three_point(
+                        z_prev_prev_arr[k], z_prev_arr[j], z_cur[i],
+                        t_m2, t_m1, t_cur) * position_scale_to_m
+            dax = grp.create_dataset('ax', data=ax)
+            day = grp.create_dataset('ay', data=ay)
+            daz = grp.create_dataset('az', data=az)
+            dax.attrs["units"] = "m/s^2"
+            day.attrs["units"] = "m/s^2"
+            daz.attrs["units"] = "m/s^2"
 
             grp.create_dataset("id", data=ids_cur)
             if include_failed_tracks:
-                # 1 = tracked for full 4 frames, 0 = failed or not yet 4-frame
                 tid_arr = np.asarray(ids_cur, dtype=int)
                 in_range = (tid_arr > 0) & (tid_arr < len(id_has_4_frames))
                 tracked = np.where(
                     in_range & id_has_4_frames[tid_arr], 1, 0).astype(np.uint8)
                 grp.create_dataset('tracked', data=tracked)
             if hasattr(data, 'diameter'):
-                grp.create_dataset('diameter', data=data.diameter[mask])
-                grp.create_dataset('intensity', data=data.intensity[mask])
-                grp.create_dataset('mass', data=data.mass[mask])
+                d_all = np.asarray(data.diameter, dtype=np.float64)
+                i_all = np.asarray(data.intensity, dtype=np.float64)
+                m_all = np.asarray(data.mass, dtype=np.float64)
+                d = d_all[row_mask] if d_all.ndim == 2 else d_all.ravel()[row_mask]
+                i = i_all[row_mask] if i_all.ndim == 2 else i_all.ravel()[row_mask]
+                m = m_all[row_mask] if m_all.ndim == 2 else m_all.ravel()[row_mask]
+                grp.create_dataset('diameter', data=d)
+                grp.create_dataset('intensity', data=i)
+                grp.create_dataset('mass', data=m)
+                # Also expose per-ray components as separate datasets in h5part.
+                if i.ndim == 1:
+                    grp.create_dataset('intensity_0', data=i)
+                elif i.ndim == 2:
+                    for comp in range(i.shape[1]):
+                        grp.create_dataset(f'intensity_{comp}', data=i[:, comp])
+                if m.ndim == 1:
+                    grp.create_dataset('mass_0', data=m)
+                elif m.ndim == 2:
+                    for comp in range(m.shape[1]):
+                        grp.create_dataset(f'mass_{comp}', data=m[:, comp])

@@ -26,13 +26,14 @@ run = 'run1'
 
 # 2d or 3d tracking?
 dimension = '3d'
-# box size in x direction for track initialization (a good initial guess is the expected
-# maximum displacement of the particles in the x direction between frames)
-box_size_initial_x = 2
-# box size in y direction for track initialization
-box_size_initial_y = 1.5
-# box size in z direction for track initialization
-box_size_initial_z = 1
+# Initial search on frame+1: signed offsets from the seed (same convention as python_4be_eti).
+# Example: x_lo=-2, x_hi=+2 is symmetric; x_lo=+0.5, x_hi=+3 is only forward in +x.
+box_size_initial_x_lo = -2.0
+box_size_initial_x_hi = 2.0
+box_size_initial_y_lo = -1.5
+box_size_initial_y_hi = 1.5
+box_size_initial_z_lo = -1.0
+box_size_initial_z_hi = 1.0
 # box size used after a track is initialized (this should be as small as possible to
 # eliminate spurious track)
 box_size = 1
@@ -72,14 +73,29 @@ for frame_range in frame_ranges:
         for ii in range(len(imInit)):
             if data_range.Count[imInit[ii]] == 0:
                 if dimension == '3d':
-                    data_range = no_previous_tracks_3d(data_range, jj, ii, box_size,
-                                                       box_size_initial_x,
-                                                       box_size_initial_y,
-                                                       box_size_initial_z)
+                    data_range = no_previous_tracks_3d(
+                        data_range,
+                        jj,
+                        ii,
+                        box_size,
+                        box_size_initial_x_lo,
+                        box_size_initial_x_hi,
+                        box_size_initial_y_lo,
+                        box_size_initial_y_hi,
+                        box_size_initial_z_lo,
+                        box_size_initial_z_hi,
+                    )
                 else:
-                    data_range = no_previous_tracks(data_range, jj, ii, box_size,
-                                                    box_size_initial_x,
-                                                    box_size_initial_y)
+                    data_range = no_previous_tracks(
+                        data_range,
+                        jj,
+                        ii,
+                        box_size,
+                        box_size_initial_x_lo,
+                        box_size_initial_x_hi,
+                        box_size_initial_y_lo,
+                        box_size_initial_y_hi,
+                    )
             else:
                 if dimension == '3d':
                     data_range = previous_tracks_3d(

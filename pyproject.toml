@@ -7,7 +7,7 @@ name = "python_4be_eti"
 version = "0.1.0"
 description = "Python package for 4BE-ETI particle tracking"
 authors = [{name="Julian Reis", email="jreis25@uw.edu"}]
-dependencies = ["numpy", "matplotlib", "pandas", "h5py", "tqdm"]
+dependencies = ["numpy", "matplotlib", "pandas", "h5py", "tqdm", "numba"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -242,11 +242,104 @@ def chunk_list(seq, workers):
         yield seq[i:i + size]
 
 
+def get_frame_particle_counts(filename):
+    """Particle count per frame index from an input rays/centers HDF5 file."""
+    counts = {}
+    with h5py.File(filename, 'r') as f:
+        for key in f.keys():
+            m = re.match(r'frame(\d+)$', key)
+            if not m:
+                continue
+            frame_idx = int(m.group(1))
+            # Read only x-component shape; avoid loading full xyze into memory.
+            counts[frame_idx] = int(f[key]['xyze'][0].shape[0])
+    return counts
+
+
+def estimate_frame_range_tracking_cost(counts, frame_range):
+    """
+    Estimated tracking work for one frame range.
+
+    Matches ``process_frame_range``: for each frame index ``jj`` in
+    ``range(min(frame_range), max(frame_range))``, every particle on ``jj``
+    is linked once (mesh cost scales with local density; particle count is
+    the practical proxy without a full spatial index).
+    """
+    if not frame_range:
+        return 0
+    lo, hi = min(frame_range), max(frame_range)
+    return sum(counts.get(j, 0) for j in range(lo, hi))
+
+
+def balance_frame_ranges(frame_ranges, workers, filename=None, costs=None):
+    """
+    Partition frame ranges into worker batches with similar total tracking cost.
+
+    Uses longest-processing-time-first greedy assignment. Each batch is processed
+    in parallel and writes one tracks_part_<batch_idx>.h5part file (ranges inside
+    a batch are independent 4-frame blocks appended to that file).
+    """
+    if not frame_ranges:
+        return [], []
+    if workers <= 1:
+        if costs is None:
+            if filename is None:
+                raise ValueError(
+                    "filename is required when costs are not provided"
+                )
+            counts = get_frame_particle_counts(filename)
+            costs = [
+                estimate_frame_range_tracking_cost(counts, fr)
+                for fr in frame_ranges
+            ]
+        return [list(frame_ranges)], [sum(costs)]
+
+    if costs is None:
+        if filename is None:
+            raise ValueError("filename is required when costs are not provided")
+        counts = get_frame_particle_counts(filename)
+        costs = [
+            estimate_frame_range_tracking_cost(counts, fr) for fr in frame_ranges
+        ]
+
+    n_bins = min(int(workers), len(frame_ranges))
+    batches = [[] for _ in range(n_bins)]
+    batch_costs = [0.0] * n_bins
+    order = sorted(range(len(frame_ranges)), key=lambda i: costs[i], reverse=True)
+    for i in order:
+        j = min(range(n_bins), key=lambda k: batch_costs[k])
+        batches[j].append(frame_ranges[i])
+        batch_costs[j] += float(costs[i])
+
+    nonempty = [(b, c) for b, c in zip(batches, batch_costs) if b]
+    if not nonempty:
+        return [], []
+    batches, batch_costs = zip(*nonempty)
+    return list(batches), list(batch_costs)
+
+
+def remove_tracks_h5part_parts(folder):
+    """Remove leftover tracks_part_*.h5part from a previous run (avoids merge conflicts)."""
+    import glob
+    for path in glob.glob(os.path.join(folder, "tracks_part_*.h5part")):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def create_h5_file(folder):
     filename = os.path.join(folder, 'tracks.h5part')
-    with h5py.File(filename, 'w') as f:
-        # Create an empty HDF5 file with no datasets or groups
+    tmp_filename = filename + '.tmp'
+    with h5py.File(tmp_filename, 'w') as f:
         pass
+    os.replace(tmp_filename, filename)
+
+
+def _h5part_part_index(path):
+    import re
+    m = re.search(r"tracks_part_(\d+)\.h5part$", os.path.basename(path))
+    return int(m.group(1)) if m else -1
 
 
 def merge_tracks_h5part_parts(folder):
@@ -255,22 +348,100 @@ def merge_tracks_h5part_parts(folder):
     Used after parallel tracking so a single file is available for ParaView export.
     """
     import glob
-    pattern = os.path.join(folder, 'tracks_part_*.h5part')
-    part_files = sorted(glob.glob(pattern))
+    pattern = os.path.join(folder, "tracks_part_*.h5part")
+    part_files = sorted(glob.glob(pattern), key=_h5part_part_index)
     if not part_files:
         return
-    out_path = os.path.join(folder, 'tracks.h5part')
-    with h5py.File(out_path, 'w') as out:
+    out_path = os.path.join(folder, "tracks.h5part")
+    tmp_path = out_path + ".tmp"
+    n_copied = 0
+    with h5py.File(tmp_path, "w") as out:
         for part_path in part_files:
-            with h5py.File(part_path, 'r') as inc:
+            with h5py.File(part_path, "r") as inc:
                 for name in inc.keys():
+                    if name in out:
+                        logging.warning(
+                            "merge_tracks_h5part_parts: skip duplicate %s from %s",
+                            name,
+                            part_path,
+                        )
+                        continue
                     inc.copy(name, out)
+                    n_copied += 1
+    os.replace(tmp_path, out_path)
     for part_path in part_files:
         try:
             os.remove(part_path)
         except OSError:
             pass
-    logging.info("Merged %d part file(s) into %s", len(part_files), out_path)
+    logging.info(
+        "Merged %d part file(s) (%d Step groups) into %s",
+        len(part_files),
+        n_copied,
+        out_path,
+    )
+
+
+def append_h5part_part_into_tracks(folder, part_path):
+    """Append one tracks_part_*.h5part into tracks.h5part (sequential batch pipeline)."""
+    out_path = os.path.join(folder, "tracks.h5part")
+    if not os.path.isfile(part_path):
+        return
+    mode = "a" if os.path.isfile(out_path) else "w"
+    with h5py.File(out_path, mode) as out:
+        with h5py.File(part_path, "r") as inc:
+            for name in inc.keys():
+                if name in out:
+                    del out[name]
+                inc.copy(name, out)
+    try:
+        os.remove(part_path)
+    except OSError:
+        pass
+
+
+def seed_counts_from_h5part_bridge(
+    data,
+    h5path,
+    bridge_frame,
+    seed_frame,
+    match_tol=1e-3,
+):
+    """
+    Copy track ids from ``Step#bridge_frame`` in h5part onto particles on ``seed_frame``.
+    """
+    if bridge_frame < 0 or seed_frame <= bridge_frame or not os.path.isfile(h5path):
+        return
+    step = f"Step#{bridge_frame}"
+    with h5py.File(h5path, "r") as f:
+        if step not in f:
+            return
+        grp = f[step]
+        bids = np.asarray(grp["id"]).ravel().astype(np.int64)
+        bx = np.asarray(grp["x"]).ravel()
+        by = np.asarray(grp["y"]).ravel()
+        bz = np.asarray(grp["z"]).ravel()
+    ok = bids > 0
+    if not np.any(ok):
+        return
+    bids, bx, by, bz = bids[ok], bx[ok], by[ok], bz[ok]
+    tol2 = float(match_tol) ** 2
+
+    slice_flat = np.asarray(data.Slice).ravel()
+    mask_s = slice_flat == seed_frame
+    if not np.any(mask_s):
+        return
+    xs = np.asarray(data.x).ravel()[mask_s]
+    ys = np.asarray(data.y).ravel()[mask_s]
+    zs = np.asarray(data.z).ravel()[mask_s]
+    idxs = np.where(mask_s)[0]
+    count_flat = np.asarray(data.Count).ravel()
+    for i in range(len(xs)):
+        d2 = (bx - xs[i]) ** 2 + (by - ys[i]) ** 2 + (bz - zs[i]) ** 2
+        j = int(np.argmin(d2))
+        if d2[j] <= tol2:
+            count_flat[idxs[i]] = bids[j]
+    data.Count = count_flat.reshape(np.asarray(data.Count).shape)
 
 
 def _build_tracks_from_data(data: a, frame_range, include_failed_tracks):
@@ -421,6 +592,7 @@ def write_data_h5(
     track_length=4,
     position_scale_to_m=1e-3,
     position_units_str="mm",
+    verbose=True,
 ):
     """Write track data to HDF5. If output_h5part is set (parallel mode), write to that file instead of folder/tracks.h5part.
 
@@ -474,7 +646,8 @@ def write_data_h5(
         f.attrs["velocity_units"] = "m/s"
         f.attrs["acceleration_units"] = "m/s^2"
 
-        print(frame_range)
+        if verbose:
+            print(frame_range)
         for frame in frame_range:
             step_name = f"Step#{frame}"
             if step_name in f:

@@ -7,9 +7,15 @@ import logging
 from .utils.basic_utils import (
     get_nframes,
     balance_frame_ranges,
-    create_h5_file,
+    format_tracking_batch_plan,
     merge_tracks_h5part_parts,
     remove_tracks_h5part_parts,
+    remove_staging_h5part,
+    staging_h5part_path,
+    canonical_h5part_path,
+    write_h5_tracking_metadata,
+    TRACKS_H5PART_CANONICAL,
+    TRACKS_H5PART_STAGING,
     position_unit_to_meters_per_unit,
 )
 from .particle_tracking import process_batch
@@ -74,8 +80,10 @@ class FourFrameTracking():
         max_targets_mesh=None,
         debug_mesh_match_prints=0,
         verbose=True,
+        rays_input_path=None,
     ):
         self.path = path
+        self.rays_input_path = rays_input_path if rays_input_path is not None else path
         self.filename = filename
         self.box_size_x = box_size_x
         self.box_size_y = box_size_y
@@ -98,7 +106,7 @@ class FourFrameTracking():
         self.position_scale_to_m = position_unit_to_meters_per_unit(
             position_unit)
         self.num_frames = get_nframes(
-            os.path.join(path, filename))
+            os.path.join(self.rays_input_path, filename))
         self.track_length = 4
         self.frame_ranges = [list(range(i, min(i + self.track_length, self.num_frames)))
                              for i in range(0, self.num_frames, self.track_length)]
@@ -128,7 +136,38 @@ class FourFrameTracking():
         self.debug_mesh_match_prints = dmp
         self.verbose = bool(verbose)
 
-        create_h5_file(folder=self.path)
+    def tracking_parameters_dict(self, *, workers=None, max_frame_ranges=None):
+        """Serializable tracking parameters for metadata / JSON sidecar."""
+        return {
+            "job_id": "tracking",
+            "tracker": "four_frame",
+            "box_size_x": self.box_size_x,
+            "box_size_y": self.box_size_y,
+            "box_size_z": self.box_size_z,
+            "box_size_initial_x_lo": self.box_size_initial_x_lo,
+            "box_size_initial_x_hi": self.box_size_initial_x_hi,
+            "box_size_initial_y_lo": self.box_size_initial_y_lo,
+            "box_size_initial_y_hi": self.box_size_initial_y_hi,
+            "box_size_initial_z_lo": self.box_size_initial_z_lo,
+            "box_size_initial_z_hi": self.box_size_initial_z_hi,
+            "box_size_track": self.box_size_track,
+            "dt": self.dt,
+            "rep_rate": self.rep_rate,
+            "position_unit": self.position_unit,
+            "write_failed_tracks": self.write_failed_tracks,
+            "use_bspline": self.use_bspline,
+            "rays_filename": self.filename,
+            "rays_input_path": self.rays_input_path,
+            "output_path": self.path,
+            "num_frames": self.num_frames,
+            "track_length": self.track_length,
+            "workers": workers,
+            "max_frame_ranges": max_frame_ranges,
+            "max_candidates_mesh": self.max_candidates_mesh,
+            "max_targets_mesh": self.max_targets_mesh,
+            "debug_mesh_match_prints": self.debug_mesh_match_prints,
+            "particle_progress_interval": self.particle_progress_interval,
+        }
 
     def run_tracking(
         self,
@@ -137,6 +176,7 @@ class FourFrameTracking():
         max_frame_ranges=None,
         particle_progress_interval=None,
         verbose=None,
+        run_metadata=None,
     ):
         start_time = time.time()
         if particle_progress_interval is not None:
@@ -154,31 +194,27 @@ class FourFrameTracking():
                 raise ValueError("max_frame_ranges must be a positive integer or None")
             frame_ranges_to_run = self.frame_ranges[:max_frame_ranges]
 
-        input_h5 = os.path.join(self.path, self.filename)
+        input_h5 = os.path.join(self.rays_input_path, self.filename)
         batches, batch_costs = balance_frame_ranges(
             frame_ranges_to_run, workers, filename=input_h5,
         )
         n_ranges = len(frame_ranges_to_run)
-        if batch_costs:
-            total_cost = sum(batch_costs)
-            cost_str = ", ".join(
-                "{:.0f} ({:.1f}%)".format(c, 100.0 * c / total_cost)
-                for c in batch_costs
+        batch_plan_lines = format_tracking_batch_plan(batches, batch_costs)
+        for line in batch_plan_lines:
+            logging.info(line)
+            print(line, flush=True)
+
+        staging_path = staging_h5part_path(self.path)
+        canonical_path = canonical_h5part_path(self.path)
+        if os.path.isfile(canonical_path):
+            print(
+                f"Note: existing {TRACKS_H5PART_CANONICAL} will not be overwritten "
+                f"(writing to {TRACKS_H5PART_STAGING}; rename manually when satisfied).",
+                flush=True,
             )
-            logging.info(
-                "Load-balanced worker bins (estimated particle-steps): %s "
-                "(total %.0f)",
-                cost_str,
-                total_cost,
-            )
-            if verbose:
-                print(
-                    "Load-balanced worker bins (est. particle-steps): "
-                    + cost_str,
-                    flush=True,
-                )
 
         use_part_files = workers > 1
+        remove_staging_h5part(self.path)
         remove_tracks_h5part_parts(self.path)
         n_batches = len(batches)
 
@@ -200,7 +236,7 @@ class FourFrameTracking():
         if workers <= 1:
             process_batch(
                 frame_ranges_to_run,
-                output_h5part=None,
+                output_h5part=staging_path,
                 **job_kw,
             )
         else:
@@ -241,7 +277,21 @@ class FourFrameTracking():
                         )
 
         if use_part_files:
-            merge_tracks_h5part_parts(self.path)
+            merge_tracks_h5part_parts(self.path, out_path=staging_path)
 
-        logging.info('Particle tracking program took ' +
-                     str(time.time() - start_time) + ' seconds to run.')
+        meta = dict(run_metadata or {})
+        meta.update(self.tracking_parameters_dict(
+            workers=workers, max_frame_ranges=max_frame_ranges,
+        ))
+        meta["duration_seconds"] = time.time() - start_time
+        meta["output_h5part"] = TRACKS_H5PART_STAGING
+        write_h5_tracking_metadata(staging_path, meta)
+
+        elapsed = time.time() - start_time
+        logging.info('Particle tracking program took %s seconds to run.', elapsed)
+        print(
+            f"Tracking output: {staging_path} "
+            f"(rename to {TRACKS_H5PART_CANONICAL} when ready)",
+            flush=True,
+        )
+        return staging_path, meta

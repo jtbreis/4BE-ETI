@@ -24,7 +24,7 @@ def velocity_acceleration_from_bspline(t, X, Y, Z):
     ax, ay, az : ndarray, shape (n,)
         Acceleration components at each time.
 
-    Only fits when 4 or more points are tracked (cubic B-spline, k=3).
+    Only fits when at least 3 points are tracked (quadratic B-spline for 3 points, cubic for 4+).
     """
     if make_interp_spline is None:
         raise RuntimeError(
@@ -34,12 +34,15 @@ def velocity_acceleration_from_bspline(t, X, Y, Z):
     Y = np.asarray(Y, dtype=np.float64)
     Z = np.asarray(Z, dtype=np.float64)
     n = len(t)
-    if n < 4:
-        raise ValueError("B-spline fit requires at least 4 tracked points, got %d" % n)
+    if n < 3:
+        raise ValueError("B-spline fit requires at least 3 tracked points, got %d" % n)
+    if np.any(np.diff(t) <= 0):
+        raise ValueError("B-spline fit requires strictly increasing times")
 
-    spl_x = make_interp_spline(t, X, k=3)
-    spl_y = make_interp_spline(t, Y, k=3)
-    spl_z = make_interp_spline(t, Z, k=3)
+    k = min(3, n - 1)
+    spl_x = make_interp_spline(t, X, k=k)
+    spl_y = make_interp_spline(t, Y, k=k)
+    spl_z = make_interp_spline(t, Z, k=k)
 
     vx = spl_x.derivative(1)(t)
     vy = spl_y.derivative(1)(t)

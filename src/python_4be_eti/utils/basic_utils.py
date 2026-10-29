@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import os
@@ -6,6 +7,11 @@ import re
 import numpy as np
 import pandas as pd
 import h5py
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 # This file introduces functions that are needed
 
@@ -185,6 +191,7 @@ def load_data_h5(filename, frame_range):
         x = np.empty(nframes, dtype=object)
         y = np.empty(nframes, dtype=object)
         z = np.empty(nframes, dtype=object)
+        error_list = np.empty(nframes, dtype=object)
         has_props = False
         diameter_list = np.empty(nframes, dtype=object)
         intensity_list = np.empty(nframes, dtype=object)
@@ -198,6 +205,10 @@ def load_data_h5(filename, frame_range):
             x[idx] = xyze[0].reshape(-1, 1)
             y[idx] = xyze[1].reshape(-1, 1)
             z[idx] = xyze[2].reshape(-1, 1)
+            if xyze.shape[0] >= 4:
+                error_list[idx] = np.asarray(xyze[3], dtype=np.float64).reshape(-1, 1)
+            else:
+                error_list[idx] = np.full((n_pts, 1), np.nan, dtype=np.float64)
             slices[idx] = np.ones([n_pts, 1], dtype=int) * frame_idx
 
             if 'diameter' in frame and 'intensity' in frame and 'mass' in frame:
@@ -223,6 +234,7 @@ def load_data_h5(filename, frame_range):
         data.x = np.concatenate(np.vstack(x))
         data.y = np.concatenate(np.vstack(y))
         data.z = np.concatenate(np.vstack(z))
+        data.error = np.concatenate(np.vstack(error_list))
         data.Slice = np.concatenate(np.vstack(slices))
         data.Count = np.zeros_like(data.x)
         data.CountTemp = np.zeros_like(data.x)
@@ -318,6 +330,139 @@ def balance_frame_ranges(frame_ranges, workers, filename=None, costs=None):
     return list(batches), list(batch_costs)
 
 
+TRACKS_H5PART_CANONICAL = "tracks.h5part"
+TRACKS_H5PART_STAGING = "tracks_staging.h5part"
+TRACKS_STAGING_JSON = "tracks_staging.json"
+
+
+def staging_h5part_path(folder: str) -> str:
+    return os.path.join(folder, TRACKS_H5PART_STAGING)
+
+
+def staging_json_path(folder: str) -> str:
+    return os.path.join(folder, TRACKS_STAGING_JSON)
+
+
+def canonical_h5part_path(folder: str) -> str:
+    return os.path.join(folder, TRACKS_H5PART_CANONICAL)
+
+
+def _attr_value_for_h5(value):
+    try:
+        from python_4dptv.io.h5_metadata import attr_value_for_h5 as _convert
+    except ImportError:
+        if value is None:
+            return None
+        if isinstance(value, (bool, int, float, str, np.integer, np.floating, np.bool_)):
+            return value.item() if isinstance(value, (np.integer, np.floating, np.bool_)) else value
+        if isinstance(value, (list, dict)):
+            return json.dumps(value, sort_keys=True)
+        return str(value)
+    else:
+        return _convert(value)
+
+
+def _flatten_metadata_for_h5(metadata: dict, *, prefix: str = "") -> dict:
+    try:
+        from python_4dptv.io.h5_metadata import flatten_metadata_for_h5 as _flatten
+    except ImportError:
+        flat = {}
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            attr_key = f"{prefix}{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                flat.update(_flatten_metadata_for_h5(value, prefix=f"{attr_key}_"))
+            else:
+                converted = _attr_value_for_h5(value)
+                if converted is not None:
+                    flat[attr_key] = converted
+        return flat
+    else:
+        return _flatten(metadata, prefix=prefix)
+
+
+def write_h5_tracking_metadata(h5path: str, metadata: dict) -> None:
+    """Merge tracking run metadata into top-level HDF5 attributes (flattened)."""
+    if not metadata or not os.path.isfile(h5path):
+        return
+    flat = _flatten_metadata_for_h5(metadata)
+    # Mirror key processing params under names read by downstream tools.
+    aliases = {
+        "dt": "dt_s",
+        "rep_rate": "rep_rate_hz",
+        "position_unit": "position_units",
+        "tracker": "tracker",
+    }
+    for src, dst in aliases.items():
+        if src in flat and dst not in flat:
+            flat[dst] = flat[src]
+        param_key = f"parameters_{src}"
+        if param_key in flat and dst not in flat:
+            flat[dst] = flat[param_key]
+    with h5py.File(h5path, "a") as f:
+        for key, value in flat.items():
+            f.attrs[key] = value
+
+
+def remove_staging_h5part(folder: str) -> None:
+    """Remove overwriteable staging output (never touches tracks.h5part)."""
+    path = staging_h5part_path(folder)
+    if os.path.isfile(path):
+        os.remove(path)
+
+
+def _frame_range_label(frame_range):
+    """Compact label for one 4-frame block, e.g. '12-15'."""
+    if not frame_range:
+        return "?"
+    return f"{min(frame_range)}-{max(frame_range)}"
+
+
+def format_tracking_batch_plan(batches, batch_costs, *, max_ranges_per_line=12):
+    """
+    Human-readable lines describing how frame ranges were assigned to batches.
+
+    Each batch line lists its 4-frame blocks (inclusive frame indices) and
+    estimated particle-step share.
+    """
+    if not batches:
+        return []
+    total_cost = float(sum(batch_costs)) if batch_costs else 0.0
+    n_ranges = sum(len(b) for b in batches)
+    header = (
+        f"Load-balanced batch plan ({n_ranges} frame range(s) "
+        f"→ {len(batches)} batch(es)):"
+    )
+    lines = [header]
+    for idx, (batch, cost) in enumerate(zip(batches, batch_costs)):
+        ordered = sorted(batch, key=lambda fr: min(fr) if fr else 0)
+        labels = [_frame_range_label(fr) for fr in ordered]
+        if len(labels) > max_ranges_per_line:
+            shown = ", ".join(labels[: max_ranges_per_line - 1])
+            labels_str = f"{shown}, … (+{len(labels) - (max_ranges_per_line - 1)} more)"
+        else:
+            labels_str = ", ".join(labels)
+        if ordered:
+            span_lo = min(min(fr) for fr in ordered)
+            span_hi = max(max(fr) for fr in ordered)
+            span = f"frames {span_lo}-{span_hi}"
+        else:
+            span = "frames (none)"
+        pct = 100.0 * float(cost) / total_cost if total_cost else 0.0
+        lines.append(
+            f"  batch {idx}: {len(batch)} range(s), {span}, "
+            f"blocks [{labels_str}], est. {cost:.0f} steps ({pct:.1f}%)"
+        )
+    if total_cost and len(batch_costs) > 1:
+        lo, hi = min(batch_costs), max(batch_costs)
+        lines.append(
+            f"  (est. steps per batch: min {lo:.0f}, max {hi:.0f}, "
+            f"total {total_cost:.0f})"
+        )
+    return lines
+
+
 def remove_tracks_h5part_parts(folder):
     """Remove leftover tracks_part_*.h5part from a previous run (avoids merge conflicts)."""
     import glob
@@ -342,22 +487,28 @@ def _h5part_part_index(path):
     return int(m.group(1)) if m else -1
 
 
-def merge_tracks_h5part_parts(folder):
+def merge_tracks_h5part_parts(folder, out_path=None):
     """
-    Merge tracks_part_*.h5part files into tracks.h5part.
-    Used after parallel tracking so a single file is available for ParaView export.
+    Merge tracks_part_*.h5part files into a single h5part file.
+
+    Default output is tracks_staging.h5part (overwriteable). Pass out_path explicitly
+    to merge elsewhere. Never writes to tracks.h5part unless out_path requests it.
     """
     import glob
     pattern = os.path.join(folder, "tracks_part_*.h5part")
     part_files = sorted(glob.glob(pattern), key=_h5part_part_index)
     if not part_files:
-        return
-    out_path = os.path.join(folder, "tracks.h5part")
+        return None
+    out_path = out_path or staging_h5part_path(folder)
     tmp_path = out_path + ".tmp"
+    root_attrs = {}
     n_copied = 0
     with h5py.File(tmp_path, "w") as out:
         for part_path in part_files:
             with h5py.File(part_path, "r") as inc:
+                for ak, av in inc.attrs.items():
+                    if ak not in root_attrs:
+                        root_attrs[ak] = av
                 for name in inc.keys():
                     if name in out:
                         logging.warning(
@@ -368,6 +519,8 @@ def merge_tracks_h5part_parts(folder):
                         continue
                     inc.copy(name, out)
                     n_copied += 1
+        for ak, av in root_attrs.items():
+            out.attrs[ak] = av
     os.replace(tmp_path, out_path)
     for part_path in part_files:
         try:
@@ -380,6 +533,7 @@ def merge_tracks_h5part_parts(folder):
         n_copied,
         out_path,
     )
+    return out_path
 
 
 def append_h5part_part_into_tracks(folder, part_path):
@@ -477,6 +631,7 @@ def _build_tracks_from_data(data: a, frame_range, include_failed_tracks):
 def _bspline_velocity_acceleration_lookup(
     data: a, frame_range, dt, include_failed_tracks,
     rep_rate_hz=None, track_length=4,
+    show_progress=False,
 ):
     """
     For each track with at least 4 points, compute velocity and acceleration at each frame
@@ -489,8 +644,16 @@ def _bspline_velocity_acceleration_lookup(
         return {}
     tracks = _build_tracks_from_data(data, frame_range, include_failed_tracks)
     lookup = {}
-    for tid, frames_arr, x_arr, y_arr, z_arr in tracks:
-        if len(frames_arr) < 4:
+    track_iter = tracks
+    if show_progress and tqdm is not None and len(tracks) > 0:
+        track_iter = tqdm(
+            tracks,
+            desc="B-spline kinematics",
+            unit="track",
+            leave=True,
+        )
+    for tid, frames_arr, x_arr, y_arr, z_arr in track_iter:
+        if len(frames_arr) < 3:
             continue
         t = np.array(
             [
@@ -590,9 +753,11 @@ def write_data_h5(
     use_bspline=False,
     rep_rate_hz=None,
     track_length=4,
+    min_track_length=4,
     position_scale_to_m=1e-3,
     position_units_str="mm",
     verbose=True,
+    show_progress=None,
 ):
     """Write track data to HDF5. If output_h5part is set (parallel mode), write to that file instead of folder/tracks.h5part.
 
@@ -606,33 +771,62 @@ def write_data_h5(
 
     If use_bspline is True, velocity and acceleration use a cubic B-spline (tracks with at least 4 points).
     If include_failed_tracks is True, particles with Count==0 are also written with id 0 and optional 'tracked' flag.
+
+    ``show_progress`` defaults to ``verbose``. When enabled, prints tqdm bars for track-length
+    checks, B-spline kinematics, and per-frame HDF5 writes.
     """
+    if show_progress is None:
+        show_progress = verbose
     filename = output_h5part if output_h5part else os.path.join(
         folder, 'tracks.h5part')
-    frame_range_set = set(frame_range)
+    frame_range = list(frame_range)
     dt = float(dt) if dt is not None else 1.0
     rep_rate_hz = float(rep_rate_hz) if rep_rate_hz is not None else None
     track_length = int(track_length) if track_length is not None else 4
     if track_length <= 0:
         track_length = 4
     position_scale_to_m = float(position_scale_to_m)
+    frame_range_set = set(frame_range)
 
-    # Only treat a track as tracked (non-zero id counts) if it appears in a full 4 frames
+    # Only treat a track as tracked if it spans at least min_track_length frames in this range
+    min_track_length = int(min_track_length) if min_track_length is not None else 4
+    if min_track_length < 1:
+        min_track_length = 1
     max_id = int(np.max(data.Count)) if data.Count.size else 0
-    id_has_4_frames = np.zeros(max(1, max_id + 1), dtype=bool)
+    id_meets_min_length = np.zeros(max(1, max_id + 1), dtype=bool)
     if max_id > 0:
         in_range = np.isin(data.Slice, frame_range)
-        for tid in np.unique(data.Count[data.Count != 0]):
+        track_ids = np.unique(data.Count[data.Count != 0])
+        tid_iter = track_ids
+        if show_progress and tqdm is not None and len(track_ids) > 0:
+            tid_iter = tqdm(
+                track_ids,
+                desc="Track length check",
+                unit="track",
+                leave=True,
+            )
+        elif show_progress and len(track_ids) > 0:
+            print(f"Checking min track length for {len(track_ids)} tracks...", flush=True)
+        for tid in tid_iter:
             tid = int(tid)
             n_frames = len(
                 np.unique(data.Slice[(data.Count == tid) & in_range]))
-            id_has_4_frames[tid] = (n_frames >= 4)
+            id_meets_min_length[tid] = (n_frames >= min_track_length)
+
+    if show_progress:
+        n_tracks = int(np.sum(id_meets_min_length))
+        print(
+            f"Writing {filename}: {len(frame_range)} frame(s), "
+            f"{n_tracks} tracks (min length {min_track_length})",
+            flush=True,
+        )
 
     bspline_lookup = {}
     if use_bspline:
         bspline_lookup = _bspline_velocity_acceleration_lookup(
             data, frame_range, dt, include_failed_tracks,
             rep_rate_hz=rep_rate_hz, track_length=track_length,
+            show_progress=show_progress,
         )
 
     with h5py.File(filename, 'a') as f:
@@ -648,7 +842,17 @@ def write_data_h5(
 
         if verbose:
             print(frame_range)
-        for frame in frame_range:
+        frame_iter = frame_range
+        if show_progress and tqdm is not None and len(frame_range) > 0:
+            frame_iter = tqdm(
+                frame_range,
+                desc="Writing h5part",
+                unit="frame",
+                leave=True,
+            )
+        elif show_progress and len(frame_range) > 0:
+            print(f"Writing {len(frame_range)} frame(s) to {filename}...", flush=True)
+        for frame in frame_iter:
             step_name = f"Step#{frame}"
             if step_name in f:
                 del f[step_name]
@@ -664,10 +868,12 @@ def write_data_h5(
             else:
                 mask = (data.Slice == frame) & (data.Count != 0)
                 if max_id > 0:
-                    mask = mask & id_has_4_frames[np.asarray(
+                    mask = mask & id_meets_min_length[np.asarray(
                         data.Count, dtype=int)]
             row_mask = np.asarray(mask).ravel()
             n = int(np.sum(row_mask))
+            if show_progress and tqdm is not None and hasattr(frame_iter, "set_postfix"):
+                frame_iter.set_postfix(frame=frame, particles=n, refresh=False)
             ids_cur = np.asarray(data.Count).ravel()[row_mask]
             x_cur = np.asarray(data.x).ravel()[row_mask]
             y_cur = np.asarray(data.y).ravel()[row_mask]
@@ -684,6 +890,8 @@ def write_data_h5(
             x_prev_arr = y_prev_arr = z_prev_arr = None
             id_to_idx_prev_prev = None
             x_prev_prev_arr = y_prev_prev_arr = z_prev_prev_arr = None
+            id_to_idx_next = None
+            x_next_arr = y_next_arr = z_next_arr = None
             if (frame - 1) in frame_range_set:
                 mask_prev = (data.Slice == frame - 1) & (data.Count != 0)
                 ids_prev = data.Count[mask_prev]
@@ -700,6 +908,13 @@ def write_data_h5(
                 x_prev_prev_arr = data.x[mask_prev_prev]
                 y_prev_prev_arr = data.y[mask_prev_prev]
                 z_prev_prev_arr = data.z[mask_prev_prev]
+            if (frame + 1) in frame_range_set:
+                mask_next = (data.Slice == frame + 1) & (data.Count != 0)
+                ids_next = data.Count[mask_next]
+                id_to_idx_next = {int(t): idx for idx, t in enumerate(ids_next)}
+                x_next_arr = data.x[mask_next]
+                y_next_arr = data.y[mask_next]
+                z_next_arr = data.z[mask_next]
 
             t_cur = physical_time_seconds(
                 frame, dt, rep_rate_hz, track_length)
@@ -707,6 +922,8 @@ def write_data_h5(
                 frame - 1, dt, rep_rate_hz, track_length)
             t_m2 = physical_time_seconds(
                 frame - 2, dt, rep_rate_hz, track_length)
+            t_p1 = physical_time_seconds(
+                frame + 1, dt, rep_rate_hz, track_length)
 
             vx = np.full(n, np.nan, dtype=np.float64)
             vy = np.full(n, np.nan, dtype=np.float64)
@@ -729,6 +946,16 @@ def write_data_h5(
                             y_cur[i] - y_prev_arr[j]) / dt_step * position_scale_to_m
                         vz[i] = (
                             z_cur[i] - z_prev_arr[j]) / dt_step * position_scale_to_m
+                elif id_to_idx_next is not None and tid in id_to_idx_next:
+                    j = id_to_idx_next[tid]
+                    dt_step = t_p1 - t_cur
+                    if dt_step > 0:
+                        vx[i] = (
+                            x_next_arr[j] - x_cur[i]) / dt_step * position_scale_to_m
+                        vy[i] = (
+                            y_next_arr[j] - y_cur[i]) / dt_step * position_scale_to_m
+                        vz[i] = (
+                            z_next_arr[j] - z_cur[i]) / dt_step * position_scale_to_m
             dvx = grp.create_dataset('vx', data=vx)
             dvy = grp.create_dataset('vy', data=vy)
             dvz = grp.create_dataset('vz', data=vz)
@@ -769,9 +996,9 @@ def write_data_h5(
             grp.create_dataset("id", data=ids_cur)
             if include_failed_tracks:
                 tid_arr = np.asarray(ids_cur, dtype=int)
-                in_range = (tid_arr > 0) & (tid_arr < len(id_has_4_frames))
+                in_range = (tid_arr > 0) & (tid_arr < len(id_meets_min_length))
                 tracked = np.where(
-                    in_range & id_has_4_frames[tid_arr], 1, 0).astype(np.uint8)
+                    in_range & id_meets_min_length[tid_arr], 1, 0).astype(np.uint8)
                 grp.create_dataset('tracked', data=tracked)
             if hasattr(data, 'diameter'):
                 d_all = np.asarray(data.diameter, dtype=np.float64)
@@ -794,3 +1021,16 @@ def write_data_h5(
                 elif m.ndim == 2:
                     for comp in range(m.shape[1]):
                         grp.create_dataset(f'mass_{comp}', data=m[:, comp])
+            if hasattr(data, 'error'):
+                e_all = np.asarray(data.error, dtype=np.float64)
+                e = e_all[row_mask] if e_all.ndim == 2 else e_all.ravel()[row_mask]
+                if e.ndim == 2:
+                    with np.errstate(all='ignore'):
+                        rms = np.sqrt(np.nanmean(np.square(e), axis=1))
+                    ds_e = grp.create_dataset('error', data=rms)
+                    for comp in range(e.shape[1]):
+                        grp.create_dataset(f'error_{comp}', data=e[:, comp])
+                else:
+                    ds_e = grp.create_dataset('error', data=e)
+                ds_e.attrs['units'] = str(position_units_str)
+                ds_e.attrs['description'] = 'STM RMS stereomatching error'
